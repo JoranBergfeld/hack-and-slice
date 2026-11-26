@@ -186,6 +186,10 @@ folder. Completed configurations from a failed launch remain available for
 inspection but cannot produce a winner. Interrupted launches remain incomplete.
 Recovery/resume snapshots are a later checkpoint, not part of this command.
 
+After selecting, continue with [Checkpoint 4: Final evaluation](04-evaluate-classifier.md).
+Only then use the held-out test set; early examples and comparison must remain
+validation-only.
+
 <details>
 <summary>Optional hint</summary>
 

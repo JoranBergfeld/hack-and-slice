@@ -69,10 +69,18 @@ def load_classifier(
         if not (directory / name).exists():
             raise FileNotFoundError(f"{directory / name} is missing; train a classifier first")
     checkpoint = torch.load(directory / BEST_MODEL, map_location=device, weights_only=True)
-    if checkpoint.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(checkpoint, dict) or checkpoint.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"{directory / BEST_MODEL}: unsupported checkpoint version")
     vocabulary = json.loads((directory / VOCABULARY).read_text(encoding="utf-8"))
     label_mapping = json.loads((directory / LABELS).read_text(encoding="utf-8"))
+    for name, mapping in ((VOCABULARY, vocabulary), (LABELS, label_mapping)):
+        if (not isinstance(mapping, dict) or not mapping
+                or any(not isinstance(key, str) or not key for key in mapping)
+                or any(type(identifier) is not int for identifier in mapping.values())
+                or set(mapping.values()) != set(range(len(mapping)))):
+            raise ValueError(f"{directory / name}: expected unique contiguous integer IDs")
+    if vocabulary.get("<unk>") != 0:
+        raise ValueError(f"{directory / VOCABULARY}: <unk> must have ID 0")
     settings = checkpoint["model_settings"]
     if (
         settings["vocabulary_size"] != len(vocabulary)

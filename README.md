@@ -18,6 +18,19 @@ The same checkpoint now includes participant-written selection and
 run them sequentially on CPU with captured code and data, inspect the SVG
 comparison chart, then select only from a complete, matching launch.
 
+Continue with [Checkpoint 4: Evaluate the selected classifier](docs/challenges/04-evaluate-classifier.md).
+Implement accuracy and macro-F1 by hand, check them with synthetic IDs, then
+use `python -m banking77.evaluate` to evaluate only the selected winner on
+the official held-out test set on CPU. Follow the explained one-final-evaluation
+rule; there is no enforced one-use lock.
+
+Finish with [Checkpoint 5: Use the classifier](docs/challenges/05-use-classifier.md).
+Implement saved-model prediction, run `python -m banking77.check_prediction`,
+then use `python -m banking77.predict` on a separate demonstration message.
+The checkpoint also suggests optional LLM comparison, inference-cost,
+deployment/registration, Foundry compatibility and pretrained-embedding
+investigations with documentation links and no provided solutions.
+
 Run the repository's automated behavior tests after installing
 `requirements.txt`:
 
@@ -28,3 +41,5 @@ python -m unittest discover -s tests -v
 The tests use synthetic CSVs and the documented spoiler solution in temporary
 workspaces. They require neither network access, the official held-out test set,
 nor a full training run; training tests use a few epochs on tiny synthetic data.
+Evaluation tests also generate official-shaped synthetic files to exercise the
+3,080-row loader boundary; these are not downloaded Banking77 test messages.
