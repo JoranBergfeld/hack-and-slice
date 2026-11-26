@@ -1,3 +1,18 @@
+> **Historical plan, superseded where it conflicts with the guided exercise.**
+> Use [the current specification (#13)](https://github.com/JoranBergfeld/hack-and-slice/issues/13)
+> and the [opening slides and shared concepts](slides/README.md) for implementation and workshop guidance.
+> The text below preserves earlier assumptions, not confirmed requirements or measured workshop results.
+> In particular, the cost score and two-second rule are speculative, not established event rules;
+> there is no required accuracy threshold, leaderboard, scorer, LLM comparison or deployment.
+> Participants compare at least two chosen configurations with shared seed 42, split and preprocessing;
+> model sizes and the three learning rates are configurable starting suggestions, not a fixed sweep.
+> Early stopping and model selection use validation accuracy, not validation loss or cost.
+> Training supports local CPU or independently submitted Azure ML jobs with explicit CPU/GPU selection
+> in the participant's existing workspace, not automatic shared-cluster provisioning or a required sweep.
+> Final test evaluation and demonstration-message prediction happen locally; deployment, cost investigation,
+> LLM comparison and pretrained embeddings are optional next steps without provided solutions.
+> Timing, accuracy and performance claims below have not been verified for this exercise.
+
 How we build our own intent classifier (Hack & Slice #1)
 This is the plan for the network people build on 27 November. It is written as input for a GitHub Copilot session in which you set up the repository yourself, so it explains each choice and the reason behind it: the data split, the tokenizer, every layer, the loss, the optimizer, the learning rate, training length and the Azure setup. Values called starting points are meant to be tuned on the validation set, not taken as final.
 
