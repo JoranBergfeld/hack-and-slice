@@ -1,6 +1,5 @@
 """Provided plumbing that runs one training configuration with participant code."""
 from dataclasses import asdict, dataclass
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,8 @@ from typing import Callable
 
 import sklearn
 import torch
+
+from banking77.artifacts import file_sha256, write_json
 
 SEED = 42
 RUN_RECORD = "run.json"
@@ -31,6 +32,13 @@ class TrainingConfiguration:
     embedding_size: int = 64
     hidden_size: int = 128
     dropout: float = 0.3
+
+    def model_settings(self, vocabulary_size: int, num_labels: int) -> dict:
+        return {
+            "vocabulary_size": vocabulary_size, "num_labels": num_labels,
+            "embedding_size": self.embedding_size, "hidden_size": self.hidden_size,
+            "dropout": self.dropout,
+        }
 
     def validate(self) -> None:
         if not self.learning_rate > 0:
@@ -56,10 +64,6 @@ def _read_prepared(prepared: Path) -> dict:
         if not contents[name]:
             raise ValueError(f"{prepared / name} contains no messages")
     return contents
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _to_cpu(value):
@@ -129,14 +133,8 @@ def run_training(
     validation = [Message(row["text"], row["label"]) for row in contents["validation.json"]]
 
     torch.manual_seed(SEED)
-    model_settings = {
-        "vocabulary_size": len(vocabulary),
-        "embedding_size": configuration.embedding_size,
-        "hidden_size": configuration.hidden_size,
-        "dropout": configuration.dropout,
-        "num_labels": len(label_mapping),
-    }
-    prepared_sha256 = {name: _sha256(prepared / name) for name in PREPARED_FILES}
+    model_settings = configuration.model_settings(len(vocabulary), len(label_mapping))
+    prepared_sha256 = {name: file_sha256(prepared / name) for name in PREPARED_FILES}
     model = IntentClassifier(**model_settings).to(device)
     data_order = torch.Generator().manual_seed(SEED)
     training_loader = build_loader(
@@ -292,9 +290,7 @@ def run_training(
         },
         "examples": predictions,
     }
-    (output / RUN_RECORD).write_text(
-        json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    write_json(output / RUN_RECORD, record)
     log(
         f"Best validation accuracy {record['best_validation_accuracy']:.4f} at epoch "
         f"{best_epoch} of {len(history)}. Saved: {output}"

@@ -1,10 +1,11 @@
 import argparse
 from pathlib import Path
-import sys
 
 from banking77.runner import TrainingConfiguration, run_training
+from banking77.cli import cli_errors
 
 
+@cli_errors("Training", "03-train-locally.md")
 def main() -> int:
     defaults = TrainingConfiguration()
     parser = argparse.ArgumentParser(
@@ -33,21 +34,10 @@ def main() -> int:
         hidden_size=arguments.hidden_size,
         dropout=arguments.dropout,
     )
-    try:
-        run_training(
-            configuration, arguments.prepared, arguments.output,
-            examples=arguments.examples,
-        )
-    except (
-        NotImplementedError, ValueError, OSError, RuntimeError,
-        KeyError, AttributeError, TypeError, IndexError, ZeroDivisionError,
-    ) as error:
-        print(
-            f"Training failed: {error}. "
-            "See docs/challenges/03-train-locally.md.",
-            file=sys.stderr,
-        )
-        return 1
+    run_training(
+        configuration, arguments.prepared, arguments.output,
+        examples=arguments.examples,
+    )
     return 0
 
 

@@ -133,6 +133,25 @@ class DataCheckpointTests(unittest.TestCase):
         self.assertIn("invalid intent label", invalid.stderr)
         self.assertFalse(output.exists())
 
+    def test_participant_preparation_exposes_only_the_official_data_path(self):
+        help_result = run_cli("banking77.prepare", "--help", cwd=self.workspace)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("--data-dir", help_result.stdout)
+        self.assertIn("--download", help_result.stdout)
+        self.assertNotIn("--training-csv", help_result.stdout)
+        self.assertNotIn("--categories", help_result.stdout)
+        self.install_documented_solution()
+        (self.workspace / "categories.json").write_text(
+            json.dumps([f"intent{index:02d}" for index in range(77)]))
+        (self.workspace / "train.csv").write_text("text,category\nsmall,intent00\n")
+        result = run_cli("banking77.prepare", "--data-dir", ".",
+                         cwd=self.workspace)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("10,003", result.stderr)
+        self.assertNotIn("--training-csv", result.stderr)
+        self.assertNotIn("--categories", result.stderr)
+        self.assertFalse((self.workspace / "prepared").exists())
+
     def test_explicit_held_out_loader_does_not_read_training_messages(self):
         labels = [f"intent{index:02d}" for index in range(77)]
         (self.workspace / "categories.json").write_text(json.dumps(labels))

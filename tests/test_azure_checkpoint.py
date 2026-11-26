@@ -43,6 +43,29 @@ class AzureCheckpointTests(unittest.TestCase):
             "--workspace", "test-workspace", *options,
         )
 
+    def test_shipped_editable_configurations_launch_the_suggested_starting_comparison(self):
+        self.setup_launch()
+        shutil.copyfile(ROOT / "configurations.json", self.workspace / "configurations.json")
+        result = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
+        self.assertEqual([entry["learning_rate"] for entry in manifest["configurations"]],
+                         [0.0003, 0.001, 0.003])
+        self.assertEqual(len(manifest["jobs"]), 3)
+        # Participants can edit the list rather than accepting a mandatory sweep.
+        settings = [{"learning_rate": 0.002}, {"hidden_size": 32}]
+        (self.workspace / "configurations.json").write_text(json.dumps(settings))
+        edited = self.cli("launch", "--target", "azure", "--configurations",
+                          "configurations.json", "--output", "edited",
+                          "--azure-device", "cpu", "--instance-type", "Standard_D2s_v3",
+                          "--subscription", "test-subscription", "--resource-group",
+                          "test-group", "--workspace", "test-workspace")
+        self.assertEqual(edited.returncode, 0, edited.stderr)
+        manifest = json.loads((self.workspace / "edited/launch.json").read_text())
+        self.assertEqual(len(manifest["configurations"]), 2)
+        self.assertEqual(manifest["configurations"][0]["learning_rate"], 0.002)
+        self.assertEqual(manifest["configurations"][1]["hidden_size"], 32)
+
     def test_explicit_cpu_submits_independent_jobs_without_training_and_captures_edits(self):
         self.setup_launch()
         source = self.workspace / "banking77/training.py"

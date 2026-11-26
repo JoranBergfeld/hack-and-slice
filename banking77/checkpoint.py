@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 
 from banking77.model import IntentClassifier
+from banking77.artifacts import write_json
 
 
 BEST_MODEL = "best-model.pt"
@@ -23,12 +24,6 @@ class SavedClassifier:
     validation_accuracy: float
 
 
-def _write_json(path: Path, contents) -> None:
-    path.write_text(
-        json.dumps(contents, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-
-
 def save_classifier(
     directory: Path,
     model: IntentClassifier,
@@ -41,8 +36,8 @@ def save_classifier(
 ) -> None:
     """Save the best-validation classifier with the mappings needed to reuse it."""
     directory.mkdir(parents=True, exist_ok=True)
-    _write_json(directory / VOCABULARY, vocabulary)
-    _write_json(directory / LABELS, label_mapping)
+    write_json(directory / VOCABULARY, vocabulary)
+    write_json(directory / LABELS, label_mapping)
     temporary = directory / (BEST_MODEL + ".tmp")
     torch.save(
         {

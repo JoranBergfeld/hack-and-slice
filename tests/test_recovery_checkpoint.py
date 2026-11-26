@@ -201,6 +201,70 @@ class RecoveryCheckpointTests(unittest.TestCase):
                          ["cuda"] * 3 + ["cpu"] * 2)
         self.assertEqual(record["best_epoch"], 2)
 
+    def test_completed_rejected_output_can_be_explicitly_restarted_or_resumed(self):
+        for mode in ("restart", "resume"):
+            with self.subTest(mode=mode):
+                if mode == "resume":
+                    self.setUp()
+                manifest, (rejected, reference) = self.setup_recovery_launch()
+                running = self.cli("recover", "--launch", "comparison",
+                                   "--job", rejected, "--restart")
+                self.assertEqual(running.returncode, 1, running.stdout)
+                self.assertIn("Queued", running.stderr)
+                self.service(f"service.complete({rejected!r})\n"
+                             f"service.complete({reference!r})")
+                uncollected = self.cli("recover", "--launch", "comparison",
+                                       "--job", rejected, "--restart")
+                self.assertEqual(uncollected.returncode, 1, uncollected.stdout)
+                self.assertIn("run collect first", uncollected.stderr)
+                results = self.workspace / "service" / rejected / "results"
+                if mode == "restart":
+                    (results / "best-model.pt").unlink()
+                else:
+                    record_path = results / "run.json"
+                    record = json.loads(record_path.read_text())
+                    record["software"]["torch"] = "unsupported-version"
+                    record_path.write_text(json.dumps(record))
+                collected = self.cli("collect", "--launch", "comparison")
+                self.assertEqual(collected.returncode, 1, collected.stdout)
+                self.assertIn("Collection error:", collected.stdout)
+                self.assertIn("1/2", collected.stdout)
+                # Refreshing status must not erase the reason recovery is allowed.
+                status = self.cli("status", "--launch", "comparison")
+                self.assertIn("Completed", status.stdout)
+                self.assertIn("Collection error:", status.stdout)
+                if mode == "resume":
+                    info_path = self.workspace / "service" / rejected / "info.json"
+                    info = json.loads(info_path.read_text())
+                    info["status"] = "Running"
+                    info_path.write_text(json.dumps(info))
+                    running = self.cli("recover", "--launch", "comparison",
+                                       "--job", rejected, "--resume")
+                    self.assertEqual(running.returncode, 1, running.stdout)
+                    self.assertIn("Running", running.stderr)
+                    info["status"] = "Completed"
+                    info_path.write_text(json.dumps(info))
+                before = (self.output / "runs/1/best-model.pt").read_bytes()
+                self.break_working_copy()
+                recovered = self.cli("recover", "--launch", "comparison",
+                                     "--job", rejected, "--" + mode)
+                self.assertEqual(recovered.returncode, 0, recovered.stderr)
+                stored = json.loads((self.output / "launch.json").read_text())
+                self.assertEqual(stored["launch_id"], manifest["launch_id"])
+                self.assertEqual(stored["jobs"][1]["name"], reference)
+                retry = stored["jobs"][0]["name"]
+                self.service(f"service.complete({retry!r})")
+                collected = self.cli("collect", "--launch", "comparison")
+                self.assertEqual(collected.returncode, 0, collected.stderr)
+                self.assertIn("2/2", collected.stdout)
+                self.assertEqual((self.output / "runs/1/best-model.pt").read_bytes(), before)
+                record = json.loads((self.output / "runs/0/run.json").read_text())
+                self.assertEqual(record["recovery"]["mode"], mode)
+                blocked = self.cli("recover", "--launch", "comparison",
+                                   "--job", retry, "--restart")
+                self.assertEqual(blocked.returncode, 1)
+                self.assertIn("already has a collected result", blocked.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

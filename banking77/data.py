@@ -108,7 +108,7 @@ def load_training(
     if len(labels) != 77 or len(messages) != 10003:
         raise ValueError(
             "Official Banking77 training requires 10,003 messages and 77 labels; "
-            "use --training-csv and --categories for synthetic inputs"
+            "supply official train.csv and categories.json with --data-dir or --download"
         )
     return messages, labels
 

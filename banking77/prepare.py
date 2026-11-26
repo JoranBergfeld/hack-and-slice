@@ -1,11 +1,10 @@
 import argparse
 from dataclasses import asdict
-import hashlib
-import json
 from pathlib import Path
 import sys
 
 from banking77 import data
+from banking77.artifacts import file_sha256, write_json
 
 
 def main() -> int:
@@ -16,13 +15,9 @@ def main() -> int:
         "--download", action="store_true",
         help="Download missing official training files",
     )
-    parser.add_argument(
-        "--training-csv", type=Path,
-        help="Use a custom training CSV, without official row-count checks",
-    )
-    parser.add_argument(
-        "--categories", type=Path, help="Label JSON required with --training-csv",
-    )
+    # Non-participant seam for offline synthetic fixtures.
+    parser.add_argument("--training-csv", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--categories", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if bool(arguments.training_csv) != bool(arguments.categories):
         parser.error("--training-csv and --categories must be supplied together")
@@ -51,8 +46,8 @@ def main() -> int:
             "metadata.json": {
                 "schema_version": 1,
                 "seed": 42,
-                "training_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                "categories_sha256": hashlib.sha256(categories.read_bytes()).hexdigest(),
+                "training_source_sha256": file_sha256(source),
+                "categories_sha256": file_sha256(categories),
                 "source_rows": len(messages),
                 "training_rows": len(training),
                 "validation_rows": len(validation),
@@ -60,10 +55,7 @@ def main() -> int:
         }
         arguments.output.mkdir(parents=True, exist_ok=True)
         for name, contents in artifacts.items():
-            (arguments.output / name).write_text(
-                json.dumps(contents, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            write_json(arguments.output / name, contents)
     except (NotImplementedError, ValueError, OSError) as error:
         print(
             f"Preparation failed: {error}. "

@@ -3,16 +3,16 @@ import argparse
 import json
 import math
 from pathlib import Path
-import pickle
-import sys
 
 import torch
 
 from banking77.checkpoint import SavedClassifier, load_classifier
-from banking77.compare import validate_results
+from banking77.compare import selection_record, validate_results
 from banking77.data import load_test, read_messages
 from banking77.evaluation import accuracy, macro_f1
 from banking77.training import build_loader
+from banking77.artifacts import write_json
+from banking77.cli import cli_errors
 
 
 def selected_classifier(launch: Path) -> tuple[dict, dict, SavedClassifier]:
@@ -25,15 +25,11 @@ def selected_classifier(launch: Path) -> tuple[dict, dict, SavedClassifier]:
     index = selection.get("configuration_index")
     if type(index) is not int or not 0 <= index < len(records):
         raise ValueError("selection.json: invalid configuration index")
-    winner = max(range(len(records)),
-                 key=lambda position: records[position]["best_validation_accuracy"])
-    expected = {
-        "launch_id": records[index]["provenance"]["launch_id"],
-        "configuration_index": index, "run": f"runs/{index}",
-        "best_validation_accuracy": records[index]["best_validation_accuracy"],
-    }
-    if selection != expected or index != winner:
-        raise ValueError("selection.json does not match this launch's validation winner")
+    if selection != selection_record(records):
+        raise ValueError("selection.json does not match this launch's validation winner; "
+                         "check select_configuration, then re-run "
+                         f"python -m banking77.compare select --launch \"{launch}\" "
+                         "before evaluation")
     saved = load_classifier(launch / "runs" / str(index), device="cpu")
     return selection, records[index], saved
 
@@ -70,9 +66,7 @@ def evaluate(launch: Path, data_dir: Path, *, download: bool = False,
     report = {**selection, "device": "cpu",
               "test_source": "synthetic" if test_csv is not None else "official held-out",
               "message_count": len(messages), **scores}
-    temporary = launch / "evaluation.json.tmp"
-    temporary.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(launch / "evaluation.json")
+    write_json(launch / "evaluation.json", report)
     print(f"Final evaluation on local CPU: configuration "
           f"{selection['configuration_index'] + 1}, "
           f"{report['message_count']} {report['test_source']} messages")
@@ -80,23 +74,18 @@ def evaluate(launch: Path, data_dir: Path, *, download: bool = False,
     return report
 
 
+@cli_errors("Evaluation", "04-evaluate-classifier.md")
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate the selected winner on local CPU.")
     parser.add_argument("--launch", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument("--download", action="store_true")
-    sources.add_argument("--test-csv", type=Path, help="explicit synthetic offline test CSV")
+    # Non-participant seam for offline synthetic fixtures.
+    sources.add_argument("--test-csv", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
-    try:
-        evaluate(arguments.launch, arguments.data_dir, download=arguments.download,
-                 test_csv=arguments.test_csv)
-    except (NotImplementedError, AssertionError, ValueError, OSError, RuntimeError,
-            KeyError, AttributeError, TypeError, IndexError, ZeroDivisionError,
-            ImportError, EOFError, pickle.UnpicklingError) as error:
-        print(f"Evaluation failed: {error}. "
-              "See docs/challenges/04-evaluate-classifier.md.", file=sys.stderr)
-        return 1
+    evaluate(arguments.launch, arguments.data_dir, download=arguments.download,
+             test_csv=arguments.test_csv)
     return 0
 
 

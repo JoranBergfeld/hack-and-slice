@@ -30,6 +30,13 @@ class EvaluationCheckpointTests(unittest.TestCase):
         self.assertIn("Implement accuracy", result.stderr)
         self.assertIn(CHALLENGE, result.stderr)
 
+    def test_participant_evaluation_help_keeps_synthetic_inputs_out_of_the_workflow(self):
+        result = run_cli("banking77.evaluate", "--help", cwd=self.workspace)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--data-dir", result.stdout)
+        self.assertIn("--download", result.stdout)
+        self.assertNotIn("--test-csv", result.stdout)
+
     def test_documented_manual_metrics_pass_checks_and_wrong_metrics_fail(self):
         self.install_evaluation_solution()
         result = run_cli("banking77.check_evaluation", cwd=self.workspace)
@@ -187,3 +194,30 @@ class EvaluationCheckpointTests(unittest.TestCase):
                 self.assertIn(CHALLENGE, result.stderr)
                 self.assertFalse((self.workspace / "never-download").exists())
                 self.assertFalse((output / "evaluation.json").exists())
+
+    def test_selection_consistency_uses_participant_selector_and_explains_reselection(self):
+        output = self.selected_launch()
+        selected = run_cli("banking77.compare", "select", "--launch", "comparison",
+                           cwd=self.workspace)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        module = self.workspace / "banking77/training.py"
+        module.write_text(module.read_text() +
+                          "\ndef select_configuration(results):\n    return 0\n")
+        blocked = run_cli("banking77.evaluate", "--launch", "comparison",
+                          "--data-dir", "never-download",
+                          cwd=self.workspace)
+        self.assertEqual(blocked.returncode, 1, blocked.stdout)
+        self.assertIn("compare select --launch", blocked.stderr)
+        self.assertIn("select_configuration", blocked.stderr)
+        self.assertFalse((self.workspace / "never-download").exists())
+        reselected = run_cli("banking77.compare", "select", "--launch", "comparison",
+                             cwd=self.workspace)
+        self.assertEqual(reselected.returncode, 0, reselected.stderr)
+        (self.workspace / "heldout.csv").write_text(
+            "text,category\ncash,cash\nrefund,Refund_not_showing_up\n")
+        evaluated = run_cli("banking77.evaluate", "--launch", "comparison",
+                            "--test-csv", "heldout.csv", cwd=self.workspace)
+        self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+        report = json.loads((output / "evaluation.json").read_text())
+        self.assertEqual(report["configuration_index"], 0)
+        self.assertEqual(report["run"], "runs/0")

@@ -137,24 +137,19 @@ while the best model is still the one from epoch 2.
 
 ## Compare your configurations
 
-Create `configurations.json` in the repository root. This is an editable JSON
-list, not a mandatory sweep. For example, start with:
-
-```json
-[
-  {"learning_rate": 0.0003},
-  {"learning_rate": 0.001},
-  {"learning_rate": 0.003}
-]
-```
+Edit the provided [`configurations.json`](../../configurations.json) in the
+repository root. Its three learning rates (`0.0003`, `0.001`, `0.003`) with
+the other defaults are a suggested starting comparison, not a mandatory sweep.
 
 Use **at least two** entries, with no fixed maximum. Each entry may override
 `learning_rate`, `batch_size`, `max_epochs`, `patience`, `embedding_size`,
 `hidden_size`, and `dropout`; omitted values use the starting settings above.
 You can compare model sizes or patience instead of learning rates. More runs
-take more time on CPU and, when Azure training is added, can incur additional
-Azure compute charges. Choose `--target local-cpu` for sequential local training,
-or follow the Azure section below. Local GPU and Apple Silicon are not supported.
+take more time on CPU and can incur additional Azure compute charges.
+Every launch requires an explicit `--target local-cpu`
+for sequential local training or `--target azure` as described below; omitting
+it is an error, not an automatic local run. Local GPU and Apple Silicon are
+not supported.
 
 ```powershell
 python -m banking77.check_training
@@ -340,9 +335,17 @@ to train that configuration again from epoch 1, for example when the job failed
 before finishing its first epoch (resume then refuses with "no usable latest
 resumable snapshot") or never started.
 
-Recovery refuses jobs that are still queued/running, already completed or
-collected, or not the current job of a configuration in this launch. Completed
-configurations, their collected results and the original launch ID are kept;
+If a job says `Completed` but `collect` rejects its outputs (for example missing
+files or mismatched software), retry collection if the download problem was
+temporary. Otherwise explicitly use `recover --restart`, or `--resume` if the
+job has a valid latest snapshot. Run `collect` first to record the rejection;
+`status` preserves and shows that collection error. A resumed snapshot already
+at the final epoch can rebuild the result without more training.
+
+Recovery refuses jobs that are still queued/running, completed without a
+recorded collection rejection, already collected, or not the current job of a
+configuration in this launch. Valid collected configurations and the original
+launch ID are kept;
 `launch.json` records each attempt under `recoveries`. Afterwards use `status`
 and `collect` as usual; the collected `run.json` records the recovery (mode,
 failed job, epoch resumed after, previous device), and each history entry

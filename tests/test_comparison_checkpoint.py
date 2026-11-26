@@ -201,7 +201,19 @@ class ComparisonCheckpointTests(unittest.TestCase):
         self.assertIn("03-train-locally.md", checked.stderr)
         (self.workspace / "configurations.json").write_text('[{"learning_rate": 0.001}]')
         invalid = run_cli("banking77.compare", "launch", "--configurations",
-                          "configurations.json", "--output", "invalid", cwd=self.workspace)
+                          "configurations.json", "--target", "local-cpu",
+                          "--output", "invalid", cwd=self.workspace)
         self.assertEqual(invalid.returncode, 1, invalid.stdout)
         self.assertIn("at least two configurations", invalid.stderr)
         self.assertFalse((self.workspace / "invalid").exists())
+
+    def test_launch_requires_a_target_before_creating_or_training_anything(self):
+        (self.workspace / "configurations.json").write_text(
+            '[{"learning_rate": 0.0003}, {"learning_rate": 0.001}]')
+        result = run_cli("banking77.compare", "launch", "--configurations",
+                         "configurations.json", "--output", "comparison",
+                         cwd=self.workspace)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--target", result.stderr)
+        self.assertIn("required", result.stderr)
+        self.assertFalse((self.workspace / "comparison").exists())

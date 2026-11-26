@@ -9,8 +9,12 @@ import tempfile
 from typing import Protocol
 
 from banking77.compare import (
-    RESULT_FILES, _chart, _hash, _validate_results, _write, capture, validate_results,
+    RESULT_FILES, capture, validate_manifest_results, validate_results, write_chart,
 )
+from banking77.artifacts import file_sha256, write_json
+from banking77.azure_settings import job_name, torch_build, torch_device
+
+RECOVERABLE = ("Failed", "Canceled", "SubmissionFailed")
 
 
 class AzureService(Protocol):
@@ -27,12 +31,15 @@ def _show(job: dict) -> None:
     print(f"  Output: {job.get('output_uri')}", flush=True)
     if job.get("error"):
         print(f"  Error: {job['error']}", flush=True)
+    if job.get("collection_error"):
+        print(f"  Collection error: {job['collection_error']}; "
+              "retry collect or explicitly recover with --restart/--resume.", flush=True)
 
 
 def _training_environment(output: Path, software: dict, azure_device: str) -> dict:
     """Image plus conda definition with the torch build for the chosen device."""
     torch_version = software["torch"].split("+")[0]
-    build = "cu124" if azure_device == "gpu" else "cpu"
+    build = torch_build(torch_device(azure_device))
     requirements = output / "source" / "requirements.txt"
     extra_packages = []
     if requirements.is_file():
@@ -64,7 +71,7 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
                        arguments.output, examples=arguments.examples)
     output = arguments.output.resolve()
     manifest.update(
-        target="azure", device="cuda" if arguments.azure_device == "gpu" else "cpu",
+        target="azure", device=torch_device(arguments.azure_device),
         status="submitting", results=[None] * len(manifest["configurations"]), jobs=[],
         azure={"subscription": arguments.subscription, "resource_group": arguments.resource_group,
                "workspace": arguments.workspace, "device": arguments.azure_device,
@@ -73,37 +80,37 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
     # Capture the exact environment definition alongside the submitted code.
     manifest["training_environment"] = _training_environment(
         output, manifest["software"], arguments.azure_device)
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     bundle = output / "submission"
     shutil.copytree(output / "source", bundle)
     shutil.copytree(output / "prepared", bundle / "prepared")
-    _write(bundle / "launch.json", manifest)
-    _write(bundle / "environment.json", manifest["training_environment"]["conda"])
+    write_json(bundle / "launch.json", manifest)
+    write_json(bundle / "environment.json", manifest["training_environment"]["conda"])
     print(f"Target: Azure ML {arguments.azure_device.upper()}, "
           f"{arguments.instance_type}, Standard tier", flush=True)
     try:
         service = service or MLService(manifest["azure"], manifest["training_environment"])
     except (ImportError, ValueError, RuntimeError, OSError) as error:
         manifest.update(status="setup_failed", error=str(error))
-        _write(output / "launch.json", manifest)
+        write_json(output / "launch.json", manifest)
         raise RuntimeError(f"Azure setup failed: {error}; install requirements-azure.txt "
                            "and authenticate with az login") from error
     failures = []
     for index in range(len(manifest["configurations"])):
-        name = f"banking77-{manifest['launch_id']}-{index}"
+        name = job_name(manifest["launch_id"], index)
         job = {"name": name, "status": "Submitting", "error": None}
         manifest["jobs"].append(job)
-        _write(output / "launch.json", manifest)
+        write_json(output / "launch.json", manifest)
         try:
             job = service.submit(bundle, name, index, manifest["azure"])
         except (RuntimeError, OSError, ValueError) as error:
             job.update(status="SubmissionFailed", error=str(error))
             failures.append(str(error))
         manifest["jobs"][index] = job
-        _write(output / "launch.json", manifest)
+        write_json(output / "launch.json", manifest)
         _show(job)
     manifest["status"] = "submission_failed" if failures else "submitted"
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     if failures:
         raise RuntimeError("; ".join(failures) + "; other submitted jobs remain available")
 
@@ -123,12 +130,14 @@ def inspect_azure(output: Path, *, collect: bool, service: AzureService | None =
             job = service.inspect(previous["name"])
             if job["name"] != previous["name"]:
                 raise ValueError("Azure status returned a different job identifier")
+            if previous.get("collection_error"):
+                job["collection_error"] = previous["collection_error"]
         except (RuntimeError, OSError, ValueError) as error:
             job = {**previous, "error": str(error)}
             failures.append(str(error))
         manifest["jobs"][index] = job
         _show(job)
-        if job["status"] in ("Failed", "Canceled", "SubmissionFailed"):
+        if job["status"] in RECOVERABLE:
             failures.append(f"{job['name']}: {job.get('error') or job['status']}")
         if collect and job["status"] == "Completed" and manifest["results"][index] is None:
             try:
@@ -140,17 +149,18 @@ def inspect_azure(output: Path, *, collect: bool, service: AzureService | None =
                     record = json.loads((downloaded / "run.json").read_text(encoding="utf-8"))
                     candidate = copy.deepcopy(manifest)
                     candidate["results"][index] = {
-                        "sha256": {name: _hash(downloaded / name) for name in RESULT_FILES},
+                        "sha256": {name: file_sha256(downloaded / name) for name in RESULT_FILES},
                         "software": record["software"],
                     }
-                    _validate_results(output, candidate, allow_partial=True,
-                                      pending_run=(index, downloaded))
+                    validate_manifest_results(output, candidate, allow_partial=True,
+                                              pending_run=(index, downloaded))
                     run = output / "runs" / str(index)
                     run.parent.mkdir(exist_ok=True)
                     if run.exists():
                         raise FileExistsError(f"{run} already exists but is not a validated result")
                     downloaded.rename(run)
                     manifest["results"][index] = candidate["results"][index]
+                    job.pop("collection_error", None)
                     progress = run / "progress.log"
                     if progress.is_file():
                         print(progress.read_text(encoding="utf-8"), flush=True)
@@ -159,24 +169,21 @@ def inspect_azure(output: Path, *, collect: bool, service: AzureService | None =
                 job["collection_error"] = str(error)
                 failures.append(f"{job['name']}: {error}")
                 print(f"  Collection error: {error}", flush=True)
-        _write(output / "launch.json", manifest)
+        write_json(output / "launch.json", manifest)
     count = sum(result is not None for result in manifest["results"])
     if collect:
         if count == len(manifest["configurations"]):
             manifest["status"] = "completed"
-            _write(output / "launch.json", manifest)
-            _chart(output, validate_results(output))
+            write_json(output / "launch.json", manifest)
+            write_chart(output, validate_results(output))
         print(f"Collected {count}/{len(manifest['configurations'])} configurations. "
               "Selection requires every valid matching result.", flush=True)
     if failures:
         raise RuntimeError("; ".join(failures))
 
 
-RECOVERABLE = ("Failed", "Canceled", "SubmissionFailed")
-
-
 def recover_azure(arguments, *, service: AzureService | None = None) -> None:
-    """Explicitly resume or restart only one failed configuration of an Azure launch."""
+    """Recover one failed job or completed job whose collected output was rejected."""
     from banking77.compare import expected_attempt
     from banking77.runner import LATEST_SNAPSHOT, load_snapshot
     output = arguments.launch.resolve()
@@ -195,17 +202,20 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
         raise ValueError("--azure-device and --instance-type must be given together; no fallback")
     service = service or MLService(manifest["azure"], manifest["training_environment"])
     job = manifest["jobs"][index]
+    collection_error = job.get("collection_error")
     if job["status"] != "SubmissionFailed":
         job = service.inspect(arguments.job)
         if job["name"] != arguments.job:
             raise ValueError("Azure status returned a different job identifier")
         manifest["jobs"][index] = job
-    if job["status"] not in RECOVERABLE:
+    if (job["status"] not in RECOVERABLE
+            and not (job["status"] == "Completed" and collection_error)):
         raise ValueError(f"{arguments.job} is {job['status']}; only Failed or Canceled "
-                         "configurations can be recovered")
+                         "jobs, failed submissions, or Completed jobs whose output was "
+                         "rejected by collect can be recovered; run collect first")
     previous = expected_attempt(manifest, index)
     if arguments.azure_device:
-        device = "cuda" if arguments.azure_device == "gpu" else "cpu"
+        device = torch_device(arguments.azure_device)
         compute = {**manifest["azure"], "device": arguments.azure_device,
                    "instance_type": arguments.instance_type}
         environment = {**manifest["training_environment"],
@@ -216,7 +226,7 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
         environment = previous["training_environment"]
     attempt = 1 + sum(entry["configuration_index"] == index
                       for entry in manifest.get("recoveries", []))
-    name = f"banking77-{manifest['launch_id']}-{index}-r{attempt}"
+    name = job_name(manifest["launch_id"], index, attempt=attempt)
     bundle = output / "recoveries" / f"{index}-r{attempt}"
     if bundle.exists():
         raise FileExistsError(f"{bundle} already exists")
@@ -248,7 +258,7 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
                                  "launch, configuration or prepared data")
             best = state["best"]
             entry.update(resumed_after_epoch=state["completed_epoch"],
-                         from_device=state["device"], snapshot_sha256=_hash(snapshot))
+                         from_device=state["device"], snapshot_sha256=file_sha256(snapshot))
             print(f"Latest resumable snapshot: after epoch {state['completed_epoch']} on "
                   f"{state['device']}; best validation {best['validation_accuracy']:.4f} "
                   f"at epoch {best['epoch']}.", flush=True)
@@ -258,11 +268,11 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
         shutil.copytree(output / "submission", bundle)
         if snapshot is not None:
             shutil.copy2(snapshot, bundle / LATEST_SNAPSHOT)
-    _write(bundle / "recovery.json", entry)
-    _write(bundle / "environment.json", environment["conda"])
+    write_json(bundle / "recovery.json", entry)
+    write_json(bundle / "environment.json", environment["conda"])
     manifest.setdefault("recoveries", []).append(entry)
     manifest["jobs"][index] = {"name": name, "status": "Submitting", "error": None}
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     print(f"Target: Azure ML {compute['device'].upper()}, {compute['instance_type']}, "
           "Standard tier", flush=True)
     try:
@@ -270,7 +280,7 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
     except (RuntimeError, OSError, ValueError) as error:
         submitted = {"name": name, "status": "SubmissionFailed", "error": str(error)}
     manifest["jobs"][index] = submitted
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     print(f"Recovering configuration {index + 1} ({entry['mode']}) as {name}; "
           f"replaces {arguments.job}. Completed configurations are unchanged.", flush=True)
     _show(submitted)

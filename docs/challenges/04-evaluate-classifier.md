@@ -67,21 +67,18 @@ Supply official `categories.json` and `test.csv` in `data`, or add `--download`
 to explicitly download missing official files. Selection and saved artifacts
 are checked **before** the test loader can read or download anything. Missing,
 invalid, mixed or incomplete artifacts fail with a pointer to this checkpoint.
+The consistency check uses your current `select_configuration`. If you change
+that function after selection, check it and re-run
+`python -m banking77.compare select --launch runs/comparison-1` before evaluating;
+do not edit `selection.json` by hand.
 The command prints the selected configuration, message count, accuracy and
 macro-F1. It saves `runs/comparison-1/evaluation.json` with the launch ID,
 selected index, run directory and final metrics. The test set never enters the
 launch's captured training/validation files. Repeating evaluation is not
 technically blocked; follow the one-final-evaluation rule yourself.
 
-For offline development only, a separate explicit synthetic boundary is:
-
-```powershell
-python -m banking77.evaluate --launch runs/comparison-1 --test-csv fixture-test.csv
-```
-
-This accepts `text,category` rows against the saved label mapping and reports
-`synthetic` rather than official held-out data. Do not substitute training or
-validation data for final evaluation.
+Use the official data path for the guided exercise. Do not substitute training,
+validation or custom data for final evaluation.
 
 Continue with [Checkpoint 5: Use the classifier](05-use-classifier.md) to label
 a separate demonstration message, not a row chosen from the test set.

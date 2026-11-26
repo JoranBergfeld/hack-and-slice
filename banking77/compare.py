@@ -7,7 +7,6 @@ import json
 import math
 from pathlib import Path
 import platform
-import pickle
 import os
 import shutil
 import subprocess
@@ -18,20 +17,12 @@ import sklearn
 import torch
 
 from banking77.runner import PREPARED_FILES, SEED, TrainingConfiguration
+from banking77.artifacts import file_sha256, write_json
+from banking77.azure_settings import job_name, torch_build, torch_device
+from banking77.cli import cli_errors
 
 
 RESULT_FILES = ("run.json", "best-model.pt", "vocabulary.json", "labels.json")
-
-
-def _write(path: Path, value) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-                         encoding="utf-8")
-    temporary.replace(path)
-
-
-def _hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _identity(hashes: dict) -> str:
@@ -59,7 +50,7 @@ def _configurations(path: Path) -> list[dict]:
     return configurations
 
 
-def _chart(output: Path, records: list[dict]) -> None:
+def write_chart(output: Path, records: list[dict]) -> None:
     height = 90 + 70 * len(records)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="{height}" '
@@ -104,7 +95,7 @@ def capture(configurations: Path, prepared: Path, output: Path, *, examples: int
         shutil.copyfile(path, destination)
     if (project / "requirements.txt").exists():
         shutil.copyfile(project / "requirements.txt", source / "requirements.txt")
-    hashes = {p.relative_to(source).as_posix(): _hash(p)
+    hashes = {p.relative_to(source).as_posix(): file_sha256(p)
               for p in sorted(source.rglob("*")) if p.is_file()}
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True,
@@ -129,11 +120,11 @@ def capture(configurations: Path, prepared: Path, output: Path, *, examples: int
         },
         "source": {"revision": revision.stdout.strip() if revision.returncode == 0 else None,
                    "identity": _identity(hashes), "sha256": hashes},
-        "prepared": {"sha256": {name: _hash(data / name) for name in PREPARED_FILES},
+        "prepared": {"sha256": {name: file_sha256(data / name) for name in PREPARED_FILES},
                      "metadata": json.loads((data / "metadata.json").read_text(encoding="utf-8"))},
         "results": [],
     }
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     return manifest
 
 
@@ -156,28 +147,28 @@ def launch(configurations: Path, prepared: Path, output: Path, *, examples: int)
         if result.returncode:
             manifest["status"] = "failed"
             manifest["error"] = f"configuration {index + 1} failed (exit {result.returncode})"
-            _write(output / "launch.json", manifest)
+            write_json(output / "launch.json", manifest)
             raise RuntimeError(manifest["error"] + "; no winner; use a new output directory")
         record = json.loads((run / "run.json").read_text(encoding="utf-8"))
         record["provenance"] = {"launch_id": manifest["launch_id"],
                                 "configuration_index": index, "source": manifest["source"],
                                 "environment": manifest["environment"]}
-        _write(run / "run.json", record)
+        write_json(run / "run.json", record)
         manifest["results"].append({
-            "sha256": {name: _hash(run / name) for name in RESULT_FILES},
+            "sha256": {name: file_sha256(run / name) for name in RESULT_FILES},
         })
-        _write(output / "launch.json", manifest)
+        write_json(output / "launch.json", manifest)
     manifest["status"] = "completed"
-    _write(output / "launch.json", manifest)
+    write_json(output / "launch.json", manifest)
     records = validate_results(output)
-    _chart(output, records)
+    write_chart(output, records)
     print(f"Comparison complete: {output / 'comparison.svg'}. Select from this launch.")
 
 
 def validate_results(output: Path, *, allow_partial: bool = False) -> list[dict]:
     """Reject partial or mixed comparisons before exposing records to selection."""
     manifest = json.loads((output / "launch.json").read_text(encoding="utf-8"))
-    return _validate_results(output, manifest, allow_partial=allow_partial)
+    return validate_manifest_results(output, manifest, allow_partial=allow_partial)
 
 
 def expected_attempt(manifest: dict, index: int) -> dict:
@@ -190,14 +181,14 @@ def expected_attempt(manifest: dict, index: int) -> dict:
                 "compute": latest["compute"],
                 "training_environment": latest["training_environment"],
                 "recovery": latest}
-    return {"job_name": f"banking77-{manifest['launch_id']}-{index}",
+    return {"job_name": job_name(manifest["launch_id"], index),
             "device": manifest["device"], "compute": manifest.get("azure"),
             "training_environment": manifest.get("training_environment"),
             "recovery": None}
 
 
-def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
-                      pending_run: tuple[int, Path] | None = None) -> list[dict]:
+def validate_manifest_results(output: Path, manifest: dict, *, allow_partial: bool,
+                              pending_run: tuple[int, Path] | None = None) -> list[dict]:
     """Validate a candidate download before exposing it as a collected result."""
     configurations = manifest["configurations"]
     if (manifest["schema_version"] != 1 or len(configurations) < 2
@@ -213,7 +204,7 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
     if target == "azure":
         azure = manifest["azure"]
         if (azure["device"] not in ("cpu", "gpu") or azure["tier"] != "Standard"
-                or manifest["device"] != ("cuda" if azure["device"] == "gpu" else "cpu")
+                or manifest["device"] != torch_device(azure["device"])
                 or len(manifest["results"]) != len(configurations)
                 or len(manifest["jobs"]) > len(configurations)):
             raise ValueError("mismatched Azure compute or configuration list")
@@ -222,12 +213,12 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
         raise ValueError("mismatched captured-code identity")
     for name, digest in source["sha256"].items():
         path = (output / "source" / name).resolve()
-        if not path.is_relative_to((output / "source").resolve()) or _hash(path) != digest:
+        if not path.is_relative_to((output / "source").resolve()) or file_sha256(path) != digest:
             raise ValueError(f"mismatched captured source: {name}")
     if set(manifest["prepared"]["sha256"]) != set(PREPARED_FILES):
         raise ValueError("incomplete prepared-data identity")
     for name, digest in manifest["prepared"]["sha256"].items():
-        if _hash(output / "prepared" / name) != digest:
+        if file_sha256(output / "prepared" / name) != digest:
             raise ValueError(f"mismatched prepared data: {name}")
     records = []
     for index, configuration in enumerate(configurations):
@@ -239,7 +230,7 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
         if set(manifest["results"][index]["sha256"]) != set(RESULT_FILES):
             raise ValueError(f"incomplete artifact identity for configuration {index + 1}")
         for name, digest in manifest["results"][index]["sha256"].items():
-            if _hash(run / name) != digest:
+            if file_sha256(run / name) != digest:
                 raise ValueError(f"mismatched result for configuration {index + 1}: {name}")
         record = json.loads((run / "run.json").read_text(encoding="utf-8"))
         attempt = expected_attempt(manifest, index)
@@ -267,7 +258,7 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
             if (record["software"]["python"] != expected["python"]
                     or record["software"]["scikit-learn"] != expected["scikit-learn"]
                     or record["software"]["torch"] != expected["torch"].split("+")[0]
-                    + ("+cu124" if attempt["device"] == "cuda" else "+cpu")):
+                    + "+" + torch_build(attempt["device"])):
                 raise ValueError(f"mismatched Azure training software for configuration {index + 1}")
         settings = TrainingConfiguration(**configuration)
         settings.validate()
@@ -296,20 +287,18 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
                 or (stopped and len(history) - best_epoch < settings.patience)):
             raise ValueError(f"invalid best epoch or early stopping for configuration {index + 1}")
         for name in ("vocabulary.json", "labels.json"):
-            if _hash(run / name) != manifest["prepared"]["sha256"][name]:
+            if file_sha256(run / name) != manifest["prepared"]["sha256"][name]:
                 # The run writes JSON with its own formatting; compare mapping content.
                 if json.loads((run / name).read_text(encoding="utf-8")) != json.loads(
                     (output / "prepared" / name).read_text(encoding="utf-8")
                 ):
                     raise ValueError(f"mismatched checkpoint mapping: {name}")
         checkpoint = torch.load(run / "best-model.pt", map_location="cpu", weights_only=True)
-        model_settings = {
-            "vocabulary_size": len(json.loads(
+        model_settings = settings.model_settings(
+            len(json.loads(
                 (run / "vocabulary.json").read_text(encoding="utf-8"))),
-            "num_labels": len(json.loads((run / "labels.json").read_text(encoding="utf-8"))),
-            "embedding_size": settings.embedding_size, "hidden_size": settings.hidden_size,
-            "dropout": settings.dropout,
-        }
+            len(json.loads((run / "labels.json").read_text(encoding="utf-8"))),
+        )
         if (checkpoint["schema_version"] != 1 or checkpoint["model_settings"] != model_settings
                 or type(checkpoint["epoch"]) is not int
                 or checkpoint["epoch"] != record["best_epoch"]
@@ -320,21 +309,28 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
     return records
 
 
-def select(output: Path) -> None:
+def selection_record(records: list[dict]) -> dict:
+    """Build the selection using the participant's current selection function."""
     from banking77.training import select_configuration
 
-    records = validate_results(output)
     index = select_configuration(records)
     if type(index) is not int or not 0 <= index < len(records):
         raise ValueError("select_configuration: return a zero-based index from the result list")
-    _write(output / "selection.json", {
+    return {
         "launch_id": records[index]["provenance"]["launch_id"],
         "configuration_index": index, "run": f"runs/{index}",
         "best_validation_accuracy": records[index]["best_validation_accuracy"],
-    })
+    }
+
+
+def select(output: Path) -> None:
+    selection = selection_record(validate_results(output))
+    index = selection["configuration_index"]
+    write_json(output / "selection.json", selection)
     print(f"Selected configuration {index + 1}: {output / 'runs' / str(index)}")
 
 
+@cli_errors("Comparison", "03-train-locally.md")
 def main(argv=None, *, azure_service=None) -> int:
     parser = argparse.ArgumentParser(description="Compare configurations on local CPU or Azure ML.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -343,8 +339,8 @@ def main(argv=None, *, azure_service=None) -> int:
     run.add_argument("--prepared", type=Path, default=Path("prepared"))
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--examples", type=int, default=5)
-    run.add_argument("--target", choices=("local-cpu", "azure"), default="local-cpu",
-                     help="Training target (default local-cpu for existing commands)")
+    run.add_argument("--target", choices=("local-cpu", "azure"), required=True,
+                     help="Explicit training target; no automatic compute fallback")
     run.add_argument("--azure-device", choices=("cpu", "gpu"))
     run.add_argument("--instance-type", help="Explicit Azure VM size; no automatic fallback")
     run.add_argument("--subscription")
@@ -356,9 +352,9 @@ def main(argv=None, *, azure_service=None) -> int:
         inspect = commands.add_parser(name)
         inspect.add_argument("--launch", type=Path, required=True)
     recover = commands.add_parser(
-        "recover", help="Explicitly resume or restart one failed Azure configuration")
+        "recover", help="Explicitly recover a failed job or rejected completed output")
     recover.add_argument("--launch", type=Path, required=True)
-    recover.add_argument("--job", required=True, help="Failed Azure job name from status")
+    recover.add_argument("--job", required=True, help="Current Azure job name from status")
     mode = recover.add_mutually_exclusive_group(required=True)
     mode.add_argument("--resume", action="store_true",
                       help="Continue from the job's latest resumable snapshot")
@@ -368,32 +364,25 @@ def main(argv=None, *, azure_service=None) -> int:
                          help="Explicit device change (e.g. CPU after GPU); default keeps it")
     recover.add_argument("--instance-type", help="Required with --azure-device")
     arguments = parser.parse_args(argv)
-    try:
-        if arguments.command == "launch":
-            if arguments.target == "azure":
-                from banking77.azure import launch_azure
-                launch_azure(arguments, service=azure_service)
-            else:
-                if any((arguments.azure_device, arguments.instance_type,
-                        arguments.subscription, arguments.resource_group, arguments.workspace)):
-                    raise ValueError("Azure options require --target azure; no compute fallback")
-                launch(arguments.configurations, arguments.prepared, arguments.output,
-                       examples=arguments.examples)
-        elif arguments.command == "select":
-            select(arguments.launch)
-        elif arguments.command == "recover":
-            from banking77.azure import recover_azure
-            recover_azure(arguments, service=azure_service)
+    if arguments.command == "launch":
+        if arguments.target == "azure":
+            from banking77.azure import launch_azure
+            launch_azure(arguments, service=azure_service)
         else:
-            from banking77.azure import inspect_azure
-            inspect_azure(arguments.launch, collect=arguments.command == "collect",
-                          service=azure_service)
-    except (NotImplementedError, ValueError, OSError, RuntimeError, KeyError,
-            AttributeError, TypeError, IndexError, ZeroDivisionError,
-            ImportError, EOFError, pickle.UnpicklingError) as error:
-        print(f"Comparison failed: {error}. See docs/challenges/03-train-locally.md.",
-              file=sys.stderr)
-        return 1
+            if any((arguments.azure_device, arguments.instance_type,
+                    arguments.subscription, arguments.resource_group, arguments.workspace)):
+                raise ValueError("Azure options require --target azure; no compute fallback")
+            launch(arguments.configurations, arguments.prepared, arguments.output,
+                   examples=arguments.examples)
+    elif arguments.command == "select":
+        select(arguments.launch)
+    elif arguments.command == "recover":
+        from banking77.azure import recover_azure
+        recover_azure(arguments, service=azure_service)
+    else:
+        from banking77.azure import inspect_azure
+        inspect_azure(arguments.launch, collect=arguments.command == "collect",
+                      service=azure_service)
     return 0
 
 
