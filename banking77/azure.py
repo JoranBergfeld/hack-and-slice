@@ -239,11 +239,20 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
             "snapshot_sha256": None,
         }
         if arguments.resume:
-            if job["status"] == "SubmissionFailed":
-                raise ValueError(f"{arguments.job} never started; use --restart")
             try:
-                downloaded = service.download(arguments.job, Path(temporary) / "download")
-                snapshot = downloaded / LATEST_SNAPSHOT
+                if job["status"] == "SubmissionFailed":
+                    prior_recovery = previous["recovery"]
+                    if not prior_recovery or not prior_recovery["snapshot_sha256"]:
+                        raise ValueError("no retained snapshot from the failed submission")
+                    snapshot = (output / "recoveries"
+                                / f"{index}-r{prior_recovery['attempt']}"
+                                / LATEST_SNAPSHOT)
+                    if file_sha256(snapshot) != prior_recovery["snapshot_sha256"]:
+                        raise ValueError("retained snapshot hash does not match")
+                else:
+                    downloaded = service.download(
+                        arguments.job, Path(temporary) / "download")
+                    snapshot = downloaded / LATEST_SNAPSHOT
                 state = load_snapshot(snapshot)
             except (OSError, RuntimeError, ValueError, KeyError, EOFError,
                     pickle.UnpicklingError) as error:

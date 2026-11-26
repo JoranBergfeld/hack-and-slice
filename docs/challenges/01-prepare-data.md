@@ -24,8 +24,9 @@ even an empty message needs one token so mean pooling remains defined.
 
 ## Setup and data loading
 
-You need Git, Python 3.11 or newer, and command-line familiarity, but no prior
-machine-learning experience. From the repository root, create an environment:
+You need Git, Python 3.11 or 3.12, and command-line familiarity, but no prior
+machine-learning experience. These versions are supported by the pinned
+PyTorch release. From the repository root, create an environment:
 
 ```powershell
 python -m venv .venv

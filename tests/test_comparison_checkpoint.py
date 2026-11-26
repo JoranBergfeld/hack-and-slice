@@ -5,6 +5,8 @@ import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 
+import torch
+
 from test_data_checkpoint import run_cli
 import test_training_checkpoint as training_tests
 
@@ -120,7 +122,8 @@ class ComparisonCheckpointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         original = self.workspace / "comparison"
         cases = ("partial", "missing", "mixed", "configuration", "data", "software",
-                 "nan", "epoch", "checkpoint", "unchecked-artifact")
+                 "nan", "epoch", "checkpoint", "state-missing", "state-shape",
+                 "state-non-finite", "unchecked-artifact")
         for case in cases:
             with self.subTest(case=case):
                 output = self.workspace / case
@@ -146,6 +149,21 @@ class ComparisonCheckpointTests(unittest.TestCase):
                     record["epochs_completed"] = 99
                 elif case == "checkpoint":
                     record["checkpoint"] = "not-the-best-model.pt"
+                elif case.startswith("state-"):
+                    checkpoint_path = output / "runs/0/best-model.pt"
+                    checkpoint = torch.load(checkpoint_path, map_location="cpu",
+                                            weights_only=True)
+                    state = checkpoint["state_dict"]
+                    parameter = next(iter(state))
+                    if case == "state-missing":
+                        del state[parameter]
+                    elif case == "state-shape":
+                        state[parameter] = torch.zeros(1)
+                    else:
+                        state[parameter].view(-1)[0] = float("nan")
+                    torch.save(checkpoint, checkpoint_path)
+                    manifest["results"][0]["sha256"]["best-model.pt"] = hashlib.sha256(
+                        checkpoint_path.read_bytes()).hexdigest()
                 elif case == "unchecked-artifact":
                     del manifest["results"][0]["sha256"]["best-model.pt"]
                 record_path.write_text(json.dumps(record))
@@ -157,6 +175,10 @@ class ComparisonCheckpointTests(unittest.TestCase):
                 self.assertEqual(selected.returncode, 1, selected.stdout)
                 self.assertIn("Comparison failed:", selected.stderr)
                 self.assertIn("03-train-locally.md", selected.stderr)
+                if case.startswith("state-"):
+                    expected = ("non-finite model parameters" if case == "state-non-finite"
+                                else "invalid model parameters")
+                    self.assertIn(expected, selected.stderr)
                 self.assertFalse((output / "selection.json").exists())
 
     def test_failed_launch_preserves_completed_runs_but_cannot_select_or_overwrite(self):

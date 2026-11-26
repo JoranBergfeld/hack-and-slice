@@ -151,6 +151,40 @@ class RecoveryCheckpointTests(unittest.TestCase):
         self.assertIsNone(runs[0]["resumed"])
         self.assertEqual(runs[0]["history"], runs[1]["history"])
 
+    def test_failed_resume_submission_can_retry_from_the_retained_snapshot(self):
+        _, (interrupted, reference) = self.setup_recovery_launch()
+        self.service(f"service.interrupt({interrupted!r}, after_epochs=3)\n"
+                     f"service.complete({reference!r})")
+        self.assertEqual(self.cli("collect", "--launch", "comparison").returncode, 1)
+
+        control = self.workspace / "service/control.json"
+        control.write_text('{"fail_submit": [0]}')
+        failed = self.cli("recover", "--launch", "comparison",
+                          "--job", interrupted, "--resume")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("synthetic submission quota error", failed.stderr)
+        stored = json.loads((self.output / "launch.json").read_text())
+        failed_submission = stored["jobs"][0]["name"]
+        self.assertEqual(stored["jobs"][0]["status"], "SubmissionFailed")
+        retained = self.output / "recoveries/0-r1/latest-snapshot.pt"
+        self.assertTrue(retained.is_file())
+
+        control.unlink()
+        retried = self.cli("recover", "--launch", "comparison",
+                           "--job", failed_submission, "--resume")
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        stored = json.loads((self.output / "launch.json").read_text())
+        retry = stored["jobs"][0]["name"]
+        self.assertEqual(stored["recoveries"][1]["resumed_after_epoch"], 3)
+        self.assertEqual(stored["recoveries"][1]["failed_job"], failed_submission)
+
+        self.service(f"service.complete({retry!r})")
+        collected = self.cli("collect", "--launch", "comparison")
+        self.assertEqual(collected.returncode, 0, collected.stderr)
+        self.assertEqual(json.loads(
+            (self.output / "runs/0/run.json").read_text()
+        )["recovery"]["mode"], "resume")
+
     def test_gpu_job_resumes_on_cpu_only_when_explicitly_chosen(self):
         manifest, (interrupted, untouched) = self.setup_recovery_launch(
             "--azure-device", "gpu", "--instance-type", "Standard_NC4as_T4_v3")

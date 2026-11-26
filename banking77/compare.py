@@ -20,6 +20,7 @@ from banking77.runner import PREPARED_FILES, SEED, TrainingConfiguration
 from banking77.artifacts import file_sha256, write_json
 from banking77.azure_settings import job_name, torch_build, torch_device
 from banking77.cli import cli_errors
+from banking77.model import IntentClassifier
 
 
 RESULT_FILES = ("run.json", "best-model.pt", "vocabulary.json", "labels.json")
@@ -305,6 +306,16 @@ def validate_manifest_results(output: Path, manifest: dict, *, allow_partial: bo
                 or checkpoint["validation_accuracy"] != record["best_validation_accuracy"]
                 or not checkpoint["state_dict"]):
             raise ValueError(f"mismatched checkpoint for configuration {index + 1}")
+        model = IntentClassifier(**model_settings)
+        try:
+            model.load_state_dict(checkpoint["state_dict"], strict=True)
+        except (RuntimeError, TypeError) as error:
+            raise ValueError(
+                f"invalid model parameters for configuration {index + 1}: {error}"
+            ) from error
+        if any(not torch.isfinite(parameter).all().item()
+               for parameter in model.state_dict().values()):
+            raise ValueError(f"non-finite model parameters for configuration {index + 1}")
         records.append(record)
     return records
 

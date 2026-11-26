@@ -1,6 +1,7 @@
 """Provided plumbing that runs one training configuration with participant code."""
 from dataclasses import asdict, dataclass
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -41,8 +42,8 @@ class TrainingConfiguration:
         }
 
     def validate(self) -> None:
-        if not self.learning_rate > 0:
-            raise ValueError("learning rate must be positive")
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("learning rate must be finite and positive")
         for name in ("batch_size", "max_epochs", "patience", "embedding_size", "hidden_size"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
