@@ -84,8 +84,8 @@ def _chart(output: Path, records: list[dict]) -> None:
     (output / "comparison.svg").write_text("\n".join(parts), encoding="utf-8")
 
 
-def launch(configurations: Path, prepared: Path, output: Path, *, examples: int) -> None:
-    """Capture immutable inputs, then run every configuration in order on CPU."""
+def capture(configurations: Path, prepared: Path, output: Path, *, examples: int) -> dict:
+    """Capture current participant code and prepared data without running training."""
     settings = _configurations(configurations)
     if examples < 0:
         raise ValueError("examples must not be negative")
@@ -117,6 +117,7 @@ def launch(configurations: Path, prepared: Path, output: Path, *, examples: int)
         shutil.copyfile(prepared / name, data / name)
     manifest = {
         "schema_version": 1, "launch_id": uuid.uuid4().hex, "status": "running",
+        "target": "local-cpu",
         "configurations": settings, "seed": SEED, "device": "cpu",
         "examples": examples, "software": _software(),
         "environment": {
@@ -133,6 +134,15 @@ def launch(configurations: Path, prepared: Path, output: Path, *, examples: int)
         "results": [],
     }
     _write(output / "launch.json", manifest)
+    return manifest
+
+
+def launch(configurations: Path, prepared: Path, output: Path, *, examples: int) -> None:
+    """Capture immutable inputs, then run every configuration in order on CPU."""
+    manifest = capture(configurations, prepared, output, examples=examples)
+    output = output.resolve()
+    settings = manifest["configurations"]
+    source, data = output / "source", output / "prepared"
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(source)
     for index, configuration in enumerate(settings):
@@ -164,13 +174,33 @@ def launch(configurations: Path, prepared: Path, output: Path, *, examples: int)
     print(f"Comparison complete: {output / 'comparison.svg'}. Select from this launch.")
 
 
-def validate_results(output: Path) -> list[dict]:
+def validate_results(output: Path, *, allow_partial: bool = False) -> list[dict]:
     """Reject partial or mixed comparisons before exposing records to selection."""
     manifest = json.loads((output / "launch.json").read_text(encoding="utf-8"))
+    return _validate_results(output, manifest, allow_partial=allow_partial)
+
+
+def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
+                      pending_run: tuple[int, Path] | None = None) -> list[dict]:
+    """Validate a candidate download before exposing it as a collected result."""
     configurations = manifest["configurations"]
-    if (manifest["schema_version"] != 1 or manifest["status"] != "completed"
-            or len(configurations) < 2 or len(manifest["results"]) != len(configurations)):
+    if (manifest["schema_version"] != 1 or len(configurations) < 2
+            or (not allow_partial and (manifest["status"] != "completed"
+                or len(manifest["results"]) != len(configurations)
+                or not all(manifest["results"])))):
         raise ValueError("incomplete or failed comparison; every configuration needs valid results")
+    target = manifest.get("target", "local-cpu")
+    if target not in ("local-cpu", "azure"):
+        raise ValueError("invalid launch target")
+    if target == "local-cpu" and manifest["device"] != "cpu":
+        raise ValueError("local comparisons require CPU; no compute fallback")
+    if target == "azure":
+        azure = manifest["azure"]
+        if (azure["device"] not in ("cpu", "gpu") or azure["tier"] != "Standard"
+                or manifest["device"] != ("cuda" if azure["device"] == "gpu" else "cpu")
+                or len(manifest["results"]) != len(configurations)
+                or len(manifest["jobs"]) > len(configurations)):
+            raise ValueError("mismatched Azure compute or configuration list")
     source = manifest["source"]
     if not source["sha256"] or source["identity"] != _identity(source["sha256"]):
         raise ValueError("mismatched captured-code identity")
@@ -185,7 +215,11 @@ def validate_results(output: Path) -> list[dict]:
             raise ValueError(f"mismatched prepared data: {name}")
     records = []
     for index, configuration in enumerate(configurations):
-        run = output / "runs" / str(index)
+        if allow_partial and (index >= len(manifest["results"])
+                              or manifest["results"][index] is None):
+            continue
+        run = (pending_run[1] if pending_run is not None and pending_run[0] == index
+               else output / "runs" / str(index))
         if set(manifest["results"][index]["sha256"]) != set(RESULT_FILES):
             raise ValueError(f"incomplete artifact identity for configuration {index + 1}")
         for name, digest in manifest["results"][index]["sha256"].items():
@@ -199,9 +233,24 @@ def validate_results(output: Path) -> list[dict]:
                                             "environment": manifest["environment"]}
                 or record["prepared"] != manifest["prepared"]
                 or record["seed"] != manifest["seed"] or record["seed"] != SEED
-                or record["device"] != manifest["device"] or record["device"] != "cpu"
-                or record["software"] != manifest["software"]):
+                or record["device"] != manifest["device"]
+                or record["device"] not in ("cpu", "cuda")
+                or record["software"] != (
+                    manifest["results"][index]["software"]
+                    if manifest.get("target") == "azure" else manifest["software"])):
             raise ValueError(f"mismatched launch provenance for configuration {index + 1}")
+        if manifest.get("target") == "azure":
+            if (record.get("training_environment") != manifest["training_environment"]
+                    or record.get("compute") != manifest["azure"]
+                    or record.get("job_name") != manifest["jobs"][index]["name"]
+                    or record.get("job_name") != f"banking77-{manifest['launch_id']}-{index}"):
+                raise ValueError(f"mismatched Azure provenance for configuration {index + 1}")
+            expected = manifest["software"]
+            if (record["software"]["python"] != expected["python"]
+                    or record["software"]["scikit-learn"] != expected["scikit-learn"]
+                    or record["software"]["torch"] != expected["torch"].split("+")[0]
+                    + ("+cu124" if manifest["device"] == "cuda" else "+cpu")):
+                raise ValueError(f"mismatched Azure training software for configuration {index + 1}")
         settings = TrainingConfiguration(**configuration)
         settings.validate()
         history = record["history"]
@@ -268,23 +317,44 @@ def select(output: Path) -> None:
     print(f"Selected configuration {index + 1}: {output / 'runs' / str(index)}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare participant configurations on local CPU.")
+def main(argv=None, *, azure_service=None) -> int:
+    parser = argparse.ArgumentParser(description="Compare configurations on local CPU or Azure ML.")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("launch")
     run.add_argument("--configurations", type=Path, required=True)
     run.add_argument("--prepared", type=Path, default=Path("prepared"))
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--examples", type=int, default=5)
+    run.add_argument("--target", choices=("local-cpu", "azure"), default="local-cpu",
+                     help="Training target (default local-cpu for existing commands)")
+    run.add_argument("--azure-device", choices=("cpu", "gpu"))
+    run.add_argument("--instance-type", help="Explicit Azure VM size; no automatic fallback")
+    run.add_argument("--subscription")
+    run.add_argument("--resource-group")
+    run.add_argument("--workspace")
     choose = commands.add_parser("select")
     choose.add_argument("--launch", type=Path, required=True)
-    arguments = parser.parse_args()
+    for name in ("status", "collect"):
+        inspect = commands.add_parser(name)
+        inspect.add_argument("--launch", type=Path, required=True)
+    arguments = parser.parse_args(argv)
     try:
         if arguments.command == "launch":
-            launch(arguments.configurations, arguments.prepared, arguments.output,
-                   examples=arguments.examples)
-        else:
+            if arguments.target == "azure":
+                from banking77.azure import launch_azure
+                launch_azure(arguments, service=azure_service)
+            else:
+                if any((arguments.azure_device, arguments.instance_type,
+                        arguments.subscription, arguments.resource_group, arguments.workspace)):
+                    raise ValueError("Azure options require --target azure; no compute fallback")
+                launch(arguments.configurations, arguments.prepared, arguments.output,
+                       examples=arguments.examples)
+        elif arguments.command == "select":
             select(arguments.launch)
+        else:
+            from banking77.azure import inspect_azure
+            inspect_azure(arguments.launch, collect=arguments.command == "collect",
+                          service=azure_service)
     except (NotImplementedError, ValueError, OSError, RuntimeError, KeyError,
             AttributeError, TypeError, IndexError, ZeroDivisionError,
             ImportError, EOFError, pickle.UnpicklingError) as error:

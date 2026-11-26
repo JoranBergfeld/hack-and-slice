@@ -24,6 +24,7 @@ class ComparisonCheckpointTests(unittest.TestCase):
         (self.workspace / "configurations.json").write_text(json.dumps(configurations))
         return run_cli(
             "banking77.compare", "launch", "--configurations", "configurations.json",
+            "--target", "local-cpu",
             "--prepared", "prepared", "--output", output, cwd=self.workspace,
         )
 

@@ -9,15 +9,6 @@ from typing import Callable
 import sklearn
 import torch
 
-from banking77.checkpoint import load_classifier, save_classifier
-from banking77.data import Message
-from banking77.model import IntentClassifier, collate_batch
-from banking77.training import (
-    build_loader, create_optimizer, early_stopping, train_epoch,
-    validation_accuracy,
-)
-
-
 SEED = 42
 RUN_RECORD = "run.json"
 PREPARED_FILES = (
@@ -75,8 +66,16 @@ def run_training(
     device: torch.device = torch.device("cpu"),
     examples: int = 5,
     log: Callable[[str], None] = print,
+    target: str = "local CPU",
 ) -> dict:
     """Train one configuration, save its best-validation classifier and run record."""
+    from banking77.checkpoint import load_classifier, save_classifier
+    from banking77.data import Message
+    from banking77.model import IntentClassifier, collate_batch
+    from banking77.training import (
+        build_loader, create_optimizer, early_stopping, train_epoch, validation_accuracy,
+    )
+
     configuration.validate()
     if examples < 0:
         raise ValueError("examples must not be negative")
@@ -109,7 +108,7 @@ def run_training(
     optimizer = create_optimizer(model, configuration.learning_rate)
 
     log(
-        f"Training on local CPU: {len(training):,} training / "
+        f"Training on {target}: {len(training):,} training / "
         f"{len(validation):,} validation messages, seed {SEED}. "
         f"Settings: {asdict(configuration)}"
     )

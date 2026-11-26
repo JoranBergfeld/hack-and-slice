@@ -1,0 +1,229 @@
+import json
+import shutil
+import subprocess
+import sys
+import unittest
+
+from test_data_checkpoint import ROOT, run_cli
+import test_comparison_checkpoint as comparison_tests
+import test_evaluation_checkpoint as evaluation_tests
+import test_prediction_checkpoint as prediction_tests
+
+
+class AzureCheckpointTests(unittest.TestCase):
+    setUp = comparison_tests.ComparisonCheckpointTests.setUp
+    install_documented_solution = comparison_tests.ComparisonCheckpointTests.install_documented_solution
+    prepare_synthetic_data = comparison_tests.ComparisonCheckpointTests.prepare_synthetic_data
+
+    def setup_launch(self):
+        self.install_documented_solution()
+        self.prepare_synthetic_data()
+        shutil.copyfile(ROOT / "tests/fake_azure_service.py",
+                        self.workspace / "fake_azure_service.py")
+        shutil.copyfile(ROOT / "requirements.txt", self.workspace / "requirements.txt")
+        (self.workspace / "configurations.json").write_text(json.dumps([
+            {"embedding_size": 4, "hidden_size": 4, "max_epochs": 1},
+            {"embedding_size": 8, "hidden_size": 8, "max_epochs": 1},
+        ]))
+
+    def cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "-c",
+             "from banking77.compare import main\n"
+             "from fake_azure_service import FakeAzure\n"
+             "raise SystemExit(main(azure_service=FakeAzure('service')))",
+             *arguments], cwd=self.workspace, capture_output=True, text=True,
+        )
+
+    def launch(self, *options):
+        return self.cli(
+            "launch", "--target", "azure", "--configurations", "configurations.json",
+            "--prepared", "prepared", "--output", "comparison",
+            "--subscription", "test-subscription", "--resource-group", "test-group",
+            "--workspace", "test-workspace", *options,
+        )
+
+    def test_explicit_cpu_submits_independent_jobs_without_training_and_captures_edits(self):
+        self.setup_launch()
+        source = self.workspace / "banking77/training.py"
+        source.write_text(source.read_text() + "\n# uncommitted participant edit\n")
+        captured = source.read_bytes()
+        result = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
+        self.assertEqual(manifest["target"], "azure")
+        self.assertEqual(manifest["status"], "submitted")
+        self.assertEqual(manifest["device"], "cpu")
+        self.assertEqual(len(manifest["jobs"]), 2)
+        self.assertEqual(len({job["name"] for job in manifest["jobs"]}), 2)
+        self.assertFalse((self.workspace / "comparison/runs").exists())
+        self.assertIn("Queued", result.stdout)
+        self.assertIn("azure.invalid/jobs/", result.stdout)
+        source.write_text("raise RuntimeError('later code must not run')\n")
+        for index, job in enumerate(manifest["jobs"]):
+            bundle = self.workspace / "service" / job["name"] / "code"
+            self.assertEqual((bundle / "banking77/training.py").read_bytes(), captured)
+            info = json.loads((bundle.parent / "info.json").read_text())
+            self.assertEqual(info["index"], index)
+            self.assertEqual(info["compute"]["tier"], "Standard")
+            self.assertEqual(info["compute"]["instance_type"], "Standard_D2s_v3")
+            self.assertEqual(info["compute"]["device"], "cpu")
+        self.assertEqual((self.workspace / "test.csv").read_text(),
+                         "DO NOT READ HELD-OUT DATA")
+
+    def test_partial_collection_reports_progress_and_blocks_selection_until_local_completion(self):
+        self.setup_launch()
+        launched = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        output = self.workspace / "comparison"
+        manifest = json.loads((output / "launch.json").read_text())
+        first, second = [job["name"] for job in manifest["jobs"]]
+        completed = subprocess.run(
+            [sys.executable, "-c", "from fake_azure_service import FakeAzure\n"
+             f"FakeAzure('service').complete({first!r})"], cwd=self.workspace,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        module = self.workspace / "banking77/training.py"
+        module.write_text(module.read_text() +
+                          "\ndef train_epoch(*args):\n"
+                          "    raise RuntimeError('new participant training must not run')\n")
+        (self.workspace / "configurations.json").write_text("[]")
+        (self.workspace / "requirements.txt").write_text("torch==0.0.0\n")
+        status = self.cli("status", "--launch", "comparison")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Completed", status.stdout)
+        self.assertIn("Queued", status.stdout)
+        collected = self.cli("collect", "--launch", "comparison")
+        self.assertEqual(collected.returncode, 0, collected.stderr)
+        self.assertIn("1/2", collected.stdout)
+        self.assertTrue((output / "runs/0/best-model.pt").is_file())
+        self.assertFalse((output / "runs/1/best-model.pt").exists())
+        self.assertIn("Epoch 1/1", collected.stdout)
+        blocked = self.cli("select", "--launch", "comparison")
+        self.assertEqual(blocked.returncode, 1, blocked.stdout)
+        self.assertIn("incomplete", blocked.stderr)
+        self.assertFalse((output / "selection.json").exists())
+        first_bytes = (output / "runs/0/best-model.pt").read_bytes()
+        completed = subprocess.run(
+            [sys.executable, "-c", "from fake_azure_service import FakeAzure\n"
+             f"FakeAzure('service').complete({second!r})"], cwd=self.workspace,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        collected = self.cli("collect", "--launch", "comparison")
+        self.assertEqual(collected.returncode, 0, collected.stderr)
+        self.assertIn("2/2", collected.stdout)
+        self.assertEqual((output / "runs/0/best-model.pt").read_bytes(), first_bytes)
+        self.assertTrue((output / "comparison.svg").is_file())
+        # Selection is participant work performed locally after training.
+        self.install_documented_solution()
+        selected = self.cli("select", "--launch", "comparison")
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        evaluation_tests.EvaluationCheckpointTests.install_evaluation_solution(self)
+        prediction_tests.PredictionCheckpointTests.install_prediction_solution(self)
+        (self.workspace / "synthetic-test.csv").write_text(
+            "text,category\ncash atm,cash\nrefund pending,Refund_not_showing_up\n")
+        evaluated = run_cli("banking77.evaluate", "--launch", "comparison",
+                            "--test-csv", "synthetic-test.csv", cwd=self.workspace)
+        self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+        self.assertIn("local CPU", evaluated.stdout)
+        report = json.loads((output / "evaluation.json").read_text())
+        self.assertEqual(report["message_count"], 2)
+        self.assertEqual(report["device"], "cpu")
+        selection = json.loads((output / "selection.json").read_text())
+        predicted = run_cli("banking77.predict", "--model", output / selection["run"],
+                            "--message", "my separate refund demonstration",
+                            cwd=self.workspace)
+        self.assertEqual(predicted.returncode, 0, predicted.stderr)
+        self.assertIn("Predicted intent:", predicted.stdout)
+        self.assertIn("local CPU", predicted.stdout)
+
+    def test_failed_submission_is_reported_and_does_not_prevent_other_independent_jobs(self):
+        self.setup_launch()
+        (self.workspace / "service").mkdir()
+        (self.workspace / "service/control.json").write_text('{"fail_submit": [0]}')
+        result = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("synthetic submission quota error", result.stderr)
+        manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
+        self.assertEqual(len(manifest["jobs"]), 2)
+        self.assertEqual(manifest["jobs"][0]["status"], "SubmissionFailed")
+        self.assertIn("quota error", manifest["jobs"][0]["error"])
+        self.assertEqual(manifest["jobs"][1]["status"], "Queued")
+        self.assertFalse((self.workspace / "comparison/selection.json").exists())
+
+    def test_gpu_choice_is_explicit_and_unavailable_cuda_cannot_fall_back(self):
+        self.setup_launch()
+        for options, message in (
+            ((), "--azure-device"),
+            (("--azure-device", "gpu"), "--instance-type"),
+        ):
+            invalid = self.launch(*options)
+            self.assertEqual(invalid.returncode, 1, invalid.stdout)
+            self.assertIn(message, invalid.stderr)
+            self.assertFalse((self.workspace / "comparison").exists())
+        invalid = self.cli("launch", "--target", "local-cpu", "--configurations",
+                           "configurations.json", "--output", "local-invalid",
+                           "--azure-device", "gpu")
+        self.assertEqual(invalid.returncode, 1, invalid.stdout)
+        self.assertIn("Azure options require --target azure", invalid.stderr)
+        self.assertFalse((self.workspace / "local-invalid").exists())
+        submitted = self.launch("--azure-device", "gpu",
+                                "--instance-type", "Standard_NC4as_T4_v3")
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
+        self.assertEqual(manifest["device"], "cuda")
+        self.assertIn("torch==2.5.1+cu124",
+                      manifest["training_environment"]["conda"]["dependencies"][-1]["pip"])
+        name = manifest["jobs"][0]["name"]
+        # This deliberately runs the captured GPU worker on a CPU-only test host.
+        failed = subprocess.run(
+            [sys.executable, "-m", "banking77.azure_worker", "--index", "0",
+             "--output", str(self.workspace / "gpu-output")],
+            cwd=self.workspace / "service" / name / "code",
+            capture_output=True, text=True,
+        )
+        self.assertEqual(failed.returncode, 1, failed.stdout)
+        self.assertIn("CUDA is unavailable; no CPU fallback", failed.stderr)
+        self.assertFalse((self.workspace / "gpu-output/best-model.pt").exists())
+
+    def test_collection_rejects_mixed_results_but_collects_other_completed_jobs_despite_failure(self):
+        self.setup_launch()
+        path = self.workspace / "configurations.json"
+        settings = json.loads(path.read_text())
+        settings.append({"embedding_size": 6, "hidden_size": 6, "max_epochs": 1})
+        path.write_text(json.dumps(settings))
+        launched = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        output = self.workspace / "comparison"
+        manifest = json.loads((output / "launch.json").read_text())
+        names = [job["name"] for job in manifest["jobs"]]
+        completed = subprocess.run(
+            [sys.executable, "-c", "from fake_azure_service import FakeAzure\n"
+             f"service = FakeAzure('service')\n"
+             f"service.complete({names[0]!r})\nservice.complete({names[1]!r})"],
+            cwd=self.workspace, capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        record_path = self.workspace / "service" / names[0] / "results/run.json"
+        record = json.loads(record_path.read_text())
+        record["provenance"]["launch_id"] = "another-comparison"
+        record_path.write_text(json.dumps(record))
+        failed_path = self.workspace / "service" / names[2] / "info.json"
+        failed = json.loads(failed_path.read_text())
+        failed.update(status="Failed", error="synthetic GPU/CPU job error")
+        failed_path.write_text(json.dumps(failed))
+        collected = self.cli("collect", "--launch", "comparison")
+        self.assertEqual(collected.returncode, 1, collected.stdout)
+        self.assertIn("mismatched launch provenance", collected.stderr)
+        self.assertIn("synthetic GPU/CPU job error", collected.stdout + collected.stderr)
+        self.assertIn("1/3", collected.stdout)
+        self.assertFalse((output / "runs/0").exists())
+        self.assertTrue((output / "runs/1/best-model.pt").is_file())
+        stored = json.loads((output / "launch.json").read_text())
+        self.assertIsNone(stored["results"][0])
+        self.assertIn("mismatched", stored["jobs"][0]["collection_error"])
+        blocked = self.cli("select", "--launch", "comparison")
+        self.assertEqual(blocked.returncode, 1, blocked.stdout)
+        self.assertFalse((output / "selection.json").exists())

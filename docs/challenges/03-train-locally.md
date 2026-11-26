@@ -1,12 +1,13 @@
-# Checkpoint 3: Train a classifier locally
+# Checkpoint 3: Train a classifier locally or on Azure ML
 
 ## Goal
 
 Implement the six starter functions in `banking77/training.py`, then train a
-from-scratch classifier on your local CPU. Watch its training loss and
+from-scratch classifier on your local CPU or explicitly chosen Azure ML CPU/GPU.
+Watch its training loss and
 validation accuracy each epoch, let early stopping end the run, and keep the
-classifier from its best validation epoch. No Azure account, GPU, or official
-test set is needed. Compare at least two configurations of your choice, inspect
+classifier from its best validation epoch. Local training needs no Azure account,
+GPU, or official test set. Compare at least two configurations of your choice, inspect
 their chart, and select the best using validation accuracy, never the test set.
 
 ## Why this step?
@@ -135,12 +136,12 @@ Use **at least two** entries, with no fixed maximum. Each entry may override
 `hidden_size`, and `dropout`; omitted values use the starting settings above.
 You can compare model sizes or patience instead of learning rates. More runs
 take more time on CPU and, when Azure training is added, can incur additional
-Azure compute charges. This command supports local CPU only; it does not submit
-Azure jobs or use a local GPU.
+Azure compute charges. Choose `--target local-cpu` for sequential local training,
+or follow the Azure section below. Local GPU and Apple Silicon are not supported.
 
 ```powershell
 python -m banking77.check_training
-python -m banking77.compare launch --configurations configurations.json --prepared prepared --output runs/comparison-1
+python -m banking77.compare launch --target local-cpu --configurations configurations.json --prepared prepared --output runs/comparison-1
 python -m banking77.compare select --launch runs/comparison-1
 ```
 
@@ -185,6 +186,141 @@ Never reuse an output directory, even after a failure: choose a new launch
 folder. Completed configurations from a failed launch remain available for
 inspection but cannot produce a winner. Interrupted launches remain incomplete.
 Recovery/resume snapshots are a later checkpoint, not part of this command.
+
+## Run the same comparison on Azure ML
+
+Complete the same participant data-loading, model and training functions first.
+Azure runs your **captured implementations**, not provided executable solutions.
+Preparation still happens locally; only the captured training/validation split,
+vocabulary, label mapping and metadata are uploaded, never the held-out test set.
+The launch uploads the current captured `banking77` code, including uncommitted
+edits, and submits **one independent asynchronous job per configuration**. It
+returns names/IDs without waiting for training (upload, authentication and
+submission themselves can take time). There is no sweep or fixed run limit.
+
+### Existing workspace and authentication
+
+You need your own existing Azure subscription and Azure ML workspace, with
+workspace access such as **Azure ML Data Scientist** or **Contributor**, permission
+to access its storage, and available Azure ML compute quota in its region for
+your chosen VM family. Ask your facilitator or workspace administrator for the
+subscription ID, resource group, workspace name and permitted CPU/GPU VM sizes.
+Network restrictions or storage-role restrictions can also prevent jobs from
+starting. This helper uses the Azure CLI's authenticated account
+(`AzureCliCredential`) and user credential passthrough for job storage access;
+it does not switch accounts or fall back to another credential or compute type.
+
+Install the optional SDK locally and sign in using the
+[Azure CLI authentication guide](https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively):
+
+```powershell
+python -m pip install -r requirements-azure.txt
+az login
+az account set --subscription YOUR_SUBSCRIPTION_ID
+python -m banking77.check_training
+```
+
+The SDK is not needed for local training or offline fake-service tests.
+For Azure CPU, explicitly supply **both** the device and VM size:
+
+```powershell
+python -m banking77.compare launch --target azure --azure-device cpu --instance-type Standard_D2s_v3 --subscription YOUR_SUBSCRIPTION_ID --resource-group YOUR_RESOURCE_GROUP --workspace YOUR_WORKSPACE --configurations configurations.json --prepared prepared --output runs/azure-comparison-1
+```
+
+For GPU, use the same command with `--azure-device gpu` and a GPU VM size allowed
+in your region, for example `--instance-type Standard_NC4as_T4_v3`. These are
+examples, not availability or price promises. The helper checks the workspace's
+VM-size catalog against your CPU/GPU choice. It submits **Standard-tier
+serverless**, one instance per job; no shared cluster is selected or created.
+Missing choices, incompatible VM sizes, authentication, quota and submission
+errors are reported. A GPU job without usable CUDA fails rather than training
+on CPU. There is no automatic compute fallback.
+
+Each launch captures a conda environment definition: the current Python,
+PyTorch and scikit-learn versions, with the CPU PyTorch build or the CUDA 12.4
+build for the explicit GPU choice, on an Azure ML Ubuntu base-image reference.
+Additional package specifiers in the captured `requirements.txt` are included.
+Local-file requirements, include files and pip options are rejected rather
+than silently ignored. Install your intended training versions locally before
+launching; the helper pins those installed versions for Azure instead of
+changing them to satisfy a different requirements pin. Unsupported versions or
+unavailable packages fail environment setup. The base-image reference is
+recorded, not a promise of a bit-for-bit immutable OS image. Each collected run
+also records actual software, runtime platform/thread information and CUDA
+version; CPU/GPU results need not be bit-for-bit identical.
+
+### Inspect, collect, then finish locally
+
+```powershell
+python -m banking77.compare status --launch runs/azure-comparison-1
+python -m banking77.compare collect --launch runs/azure-comparison-1
+```
+
+Both commands show the chosen target, each job's status, its output URI when
+assigned, and its Azure ML studio link. Open that link's **Outputs + logs** to
+follow live epoch loss/validation progress and service/training errors. The
+worker flushes progress each epoch to stdout and `progress.log`; collection
+prints that log for newly collected completed runs. Queued jobs may be waiting
+for quota, and environment builds can take time before epoch one.
+
+`collect` downloads and validates **completed** jobs even while others are queued,
+running, failed or canceled. It reports `Collected 1/3`, for example. Invalid or
+mixed outputs are reported and never promoted to a local result; other valid
+jobs are still collected. A command with job/status/download/validation errors
+returns a nonzero exit code even if some results were successfully collected.
+Repeat collection later to pick up newly completed jobs; already validated
+results are preserved. The four result files have the same local shape as
+local runs, with additional original job, compute, environment and launch
+provenance. Keep the entire launch folder intact, including `source/`,
+`prepared/`, `submission/` and `launch.json`. Changing participant code or your
+configuration file after submission does not change these jobs or their
+comparison.
+
+Only when **every configuration** has a valid matching result does collection
+create `comparison.svg` and allow the existing local selection workflow:
+
+```powershell
+python -m banking77.compare select --launch runs/azure-comparison-1
+python -m banking77.evaluate --launch runs/azure-comparison-1 --download
+```
+
+Finish the participant selection/evaluation functions as described here and in
+Checkpoint 4. Selection uses your current local selection function without
+retraining. Evaluation loads the selected saved model on local CPU, including
+when it was trained on GPU. For Checkpoint 5, pass the winner's run directory
+printed by selection as `python -m banking77.predict --model ... --message ...`;
+do not assume configuration zero won. Do not evaluate the held-out test set
+while choosing configurations.
+
+A failed setup or submission retains its original launch metadata and any
+submitted job names; other independent submissions are still attempted. If a
+network submission was ambiguous, inspect the recorded job name in your
+workspace before doing anything else. No automatic resubmission, snapshots or
+resume are implemented here; recovery is separate work. A new comparison must
+use a new output directory and gets a new launch identity.
+
+### Quota, charges and cleanup
+
+Read the [serverless compute guide](https://learn.microsoft.com/en-us/azure/machine-learning/how-to-use-serverless-compute?view=azureml-api-2),
+[Azure ML quotas](https://learn.microsoft.com/en-us/azure/machine-learning/how-to-manage-quotas?view=azureml-api-2)
+and [Azure ML pricing](https://azure.microsoft.com/en-us/pricing/details/machine-learning/)
+before launching. Standard-tier CPU/GPU jobs consume paid compute and regional
+workspace/subscription quota. More configurations, larger VMs and longer
+training increase charges; storage, environment builds and downloads can also
+incur costs. Confirm your region's prices and budget with your administrator.
+
+Cancel **your own named jobs** in Azure ML studio when they are no longer needed,
+or use `az ml job cancel --name JOB_NAME --subscription YOUR_SUBSCRIPTION_ID
+--resource-group YOUR_RESOURCE_GROUP --workspace-name YOUR_WORKSPACE`.
+Follow your workspace's retention policy for your uploaded captures, logs and
+outputs. Do not delete shared workspaces, storage accounts, environments or
+compute resources. The helper only submits/inspects/downloads jobs; it never
+provisions or deletes shared Azure resources.
+
+Automated tests run tiny synthetic data through a fake external Azure service,
+including independent submissions, partial collection, failures and local
+completion. They do **not** verify a live service, GPU training, authentication,
+quota or charges. A live smoke check is optional and must be reported separately.
 
 After selecting, continue with [Checkpoint 4: Final evaluation](04-evaluate-classifier.md).
 Only then use the held-out test set; early examples and comparison must remain

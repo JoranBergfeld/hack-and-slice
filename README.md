@@ -9,7 +9,7 @@ Continue with [Checkpoint 2: Build the classifier](docs/challenges/02-build-clas
 It introduces learned mean embeddings, configurable model dimensions, batching,
 and `python -m banking77.check_model` without a training run.
 
-Continue with [Checkpoint 3: Train locally](docs/challenges/03-train-locally.md).
+Continue with [Checkpoint 3: Train locally or on Azure ML](docs/challenges/03-train-locally.md).
 It covers cross-entropy, Adam, per-epoch validation and early stopping, checked
 offline with `python -m banking77.check_training`, then trains one configuration
 on CPU with `python -m banking77.train` and saves its best-validation classifier.
@@ -17,6 +17,12 @@ The same checkpoint now includes participant-written selection and
 `python -m banking77.compare launch` / `select`: edit a list of configurations,
 run them sequentially on CPU with captured code and data, inspect the SVG
 comparison chart, then select only from a complete, matching launch.
+Alternatively choose Azure ML CPU or GPU explicitly: submit independent
+Standard-tier serverless jobs with the same captured participant code, inspect
+status/log links, collect completed outputs while other jobs are pending or
+failed, then use the same local selection/evaluation/prediction workflow.
+The guide covers existing workspace access, authentication, quota, charges and
+cleanup; the helper does not provision or delete shared Azure resources.
 
 Continue with [Checkpoint 4: Evaluate the selected classifier](docs/challenges/04-evaluate-classifier.md).
 Implement accuracy and macro-F1 by hand, check them with synthetic IDs, then
@@ -43,3 +49,7 @@ workspaces. They require neither network access, the official held-out test set,
 nor a full training run; training tests use a few epochs on tiny synthetic data.
 Evaluation tests also generate official-shaped synthetic files to exercise the
 3,080-row loader boundary; these are not downloaded Banking77 test messages.
+Azure tests substitute only the external service boundary and exercise the
+captured worker offline. They require no Azure SDK, credentials or paid
+services, and do not count as a live Azure smoke check. Real Azure submission
+requires the optional `requirements-azure.txt`.
