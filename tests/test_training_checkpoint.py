@@ -72,6 +72,12 @@ class TrainingCheckpointTests(unittest.TestCase):
                 "earliest",
             ),
             (">= patience", "> patience", "patience"),
+            ("return max(\n", "return min(\n", "highest validation accuracy"),
+            (
+                'key=lambda index: results[index]["best_validation_accuracy"],',
+                'key=lambda index: (results[index]["best_validation_accuracy"], index),',
+                "configuration-list order",
+            ),
         ]
         for original, replacement, message in cases:
             with self.subTest(message=message):

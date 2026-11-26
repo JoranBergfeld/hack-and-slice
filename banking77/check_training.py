@@ -6,7 +6,7 @@ from torch import nn
 from banking77.data import Message
 from banking77.training import (
     build_loader, create_optimizer, early_stopping, train_epoch,
-    validation_accuracy,
+    validation_accuracy, select_configuration,
 )
 
 
@@ -175,6 +175,20 @@ def check_training() -> None:
     _check_train_epoch()
     _check_validation_accuracy()
     _check_early_stopping()
+    assert select_configuration([
+        {"best_validation_accuracy": 0.4}, {"best_validation_accuracy": 0.8},
+        {"best_validation_accuracy": 0.6},
+    ]) == 1, "select_configuration: choose the highest validation accuracy"
+    assert select_configuration([
+        {"best_validation_accuracy": 0.8}, {"best_validation_accuracy": 0.8},
+        {"best_validation_accuracy": 0.6},
+    ]) == 0, "select_configuration: break ties by configuration-list order"
+    try:
+        select_configuration([])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("select_configuration: reject empty results with ValueError")
 
 
 def main() -> int:
@@ -190,7 +204,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print("Training checks passed. Loader, Adam, one epoch, validation and early stopping.")
+    print("Training checks passed. Loader, Adam, one epoch, validation, early stopping and selection.")
     return 0
 
 

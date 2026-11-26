@@ -2,12 +2,12 @@
 
 ## Goal
 
-Implement the five starter functions in `banking77/training.py`, then train one
+Implement the six starter functions in `banking77/training.py`, then train a
 from-scratch classifier on your local CPU. Watch its training loss and
 validation accuracy each epoch, let early stopping end the run, and keep the
 classifier from its best validation epoch. No Azure account, GPU, or official
-test set is needed. A later checkpoint compares several configurations; this
-one trains a single configuration.
+test set is needed. Compare at least two configurations of your choice, inspect
+their chart, and select the best using validation accuracy, never the test set.
 
 ## Why this step?
 
@@ -45,6 +45,7 @@ in `banking77/training.py`; the docstrings describe inputs and outputs:
 | `train_epoch(model, loader, optimizer, device)` | One training pass with cross-entropy on raw logits and one optimizer step per batch. Returns the mean loss per message as a `float`. |
 | `validation_accuracy(model, loader, device)` | Fraction of messages whose highest logit is the correct intent, in evaluation mode without gradients, as a `float`. |
 | `early_stopping(validation_accuracies, patience)` | `(best_epoch, stop)`: earliest 1-based epoch with the highest accuracy, and whether `patience` epochs have passed without improvement. |
+| `select_configuration(results)` | Zero-based index of the highest `best_validation_accuracy`, breaking ties by configuration-list order; reject an empty list with `ValueError`. Provided plumbing validates the entire comparison before calling this function. |
 
 Use PyTorch's built-in cross-entropy and Adam; do not implement
 backpropagation or Adam by hand. The provided `python -m banking77.train`
@@ -64,7 +65,8 @@ or training run. Initially it names the first unfinished function. When
 complete, it prints `Training checks passed.` It covers batching and
 reproducible per-epoch shuffling, Adam settings, training mode, per-message loss
 averaging, clearing gradients before each step, evaluation mode without
-gradients, per-message accuracy, earliest-epoch ties, and patience.
+gradients, per-message accuracy, earliest-epoch ties, patience, highest-score
+selection, configuration-order ties, and empty-result rejection.
 
 Then train one configuration on your prepared data:
 
@@ -115,6 +117,75 @@ a completed run: choose a new `--output` for each run. Missing prepared files,
 invalid settings, and unfinished functions are reported with a pointer back to
 this checkpoint.
 
+## Compare your configurations
+
+Create `configurations.json` in the repository root. This is an editable JSON
+list, not a mandatory sweep. For example, start with:
+
+```json
+[
+  {"learning_rate": 0.0003},
+  {"learning_rate": 0.001},
+  {"learning_rate": 0.003}
+]
+```
+
+Use **at least two** entries, with no fixed maximum. Each entry may override
+`learning_rate`, `batch_size`, `max_epochs`, `patience`, `embedding_size`,
+`hidden_size`, and `dropout`; omitted values use the starting settings above.
+You can compare model sizes or patience instead of learning rates. More runs
+take more time on CPU and, when Azure training is added, can incur additional
+Azure compute charges. This command supports local CPU only; it does not submit
+Azure jobs or use a local GPU.
+
+```powershell
+python -m banking77.check_training
+python -m banking77.compare launch --configurations configurations.json --prepared prepared --output runs/comparison-1
+python -m banking77.compare select --launch runs/comparison-1
+```
+
+The launch runs each configuration **sequentially**, with live per-epoch loss
+and validation output and validation-message predictions. Every run uses the
+same architecture sequence, Adam, seed 42 and captured prepared split and
+preprocessing. Open `runs/comparison-1/comparison.svg` in a browser to compare
+best validation accuracies; each bar identifies its configuration, settings,
+score and best epoch. This is not an accuracy target. A tie **within a run**
+keeps its earliest best epoch; a tie **between runs** keeps the first
+configuration in your list.
+
+The launch captures the current `banking77/**/*.py` project code (including
+uncommitted edits), `requirements.txt` when present, normalized configuration
+list, example count, software versions, platform and CPU-thread settings, and
+prepared artifacts. It executes the
+captured code, not the changing working copy. `source/` holds those files and
+`prepared/` holds the training/validation data, vocabulary, labels and split
+metadata; neither reads the official test set. Keep the launch folder intact.
+Edits to your working copy or configurations affect only later launches.
+
+`launch.json` records the launch ID, Git revision (or explicitly `null` outside
+a Git checkout), captured-file SHA-256 hashes and aggregate code identity,
+data/split hashes and metadata, seed, CPU target, versions, configurations,
+completion state, and result-file hashes. Each `runs/0`, `runs/1`, ... directory
+contains the same four run outputs as a single training run. Its `run.json`
+also records the original launch ID, configuration-list index and captured
+source identity alongside settings, history, data identity, software, checkpoint
+epoch and score. Git revision alone is insufficient: uncommitted edits change
+the captured-code hash without changing the revision.
+
+Selection reads **only the specified launch**, validating every configuration's
+completed record, provenance, files, checkpoint and metrics before calling
+your `select_configuration`. It refuses partial, failed, missing, corrupt or
+mismatched results rather than comparing whichever runs happen to be available.
+It uses your current selection function, so you can finish that learning step
+after training without retraining. `selection.json` identifies the winner by
+launch ID and zero-based configuration index, with its relative run directory
+and validation score. Do not tune using the official held-out test set.
+
+Never reuse an output directory, even after a failure: choose a new launch
+folder. Completed configurations from a failed launch remain available for
+inspection but cannot produce a winner. Interrupted launches remain incomplete.
+Recovery/resume snapshots are a later checkpoint, not part of this command.
+
 <details>
 <summary>Optional hint</summary>
 
@@ -127,13 +198,15 @@ each batch: `optimizer.zero_grad()`, compute
 before averaging. In `validation_accuracy`, call `model.eval()` and wrap the loop
 in `torch.no_grad()`; `logits.argmax(dim=1)` gives each message's prediction.
 For `early_stopping`, `list.index(max(...))` finds the earliest best epoch.
+For selection, scan the results in order and replace your winner only on a
+strictly higher score, or use `max` over their indices (it keeps the first tie).
 
 </details>
 
 <details>
 <summary>Complete solution</summary>
 
-Replace the five incomplete functions with these implementations and add the
+Replace the six incomplete functions with these implementations and add the
 imports. This spoiler is not executable starter code.
 
 ```python
@@ -203,6 +276,15 @@ def early_stopping(
         raise ValueError("early_stopping requires at least one validation accuracy")
     best_epoch = validation_accuracies.index(max(validation_accuracies)) + 1
     return best_epoch, len(validation_accuracies) - best_epoch >= patience
+
+
+def select_configuration(results: list[dict]) -> int:
+    if not results:
+        raise ValueError("select_configuration requires completed results")
+    return max(
+        range(len(results)),
+        key=lambda index: results[index]["best_validation_accuracy"],
+    )
 ```
 
 </details>

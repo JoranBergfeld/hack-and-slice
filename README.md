@@ -13,6 +13,10 @@ Continue with [Checkpoint 3: Train locally](docs/challenges/03-train-locally.md)
 It covers cross-entropy, Adam, per-epoch validation and early stopping, checked
 offline with `python -m banking77.check_training`, then trains one configuration
 on CPU with `python -m banking77.train` and saves its best-validation classifier.
+The same checkpoint now includes participant-written selection and
+`python -m banking77.compare launch` / `select`: edit a list of configurations,
+run them sequentially on CPU with captured code and data, inspect the SVG
+comparison chart, then select only from a complete, matching launch.
 
 Run the repository's automated behavior tests after installing
 `requirements.txt`:

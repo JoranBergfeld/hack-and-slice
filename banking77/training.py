@@ -67,3 +67,14 @@ def early_stopping(
     best_epoch without improvement. Reject an empty list with ValueError.
     """
     raise NotImplementedError("Implement early_stopping")
+
+
+def select_configuration(results: list[dict]) -> int:
+    """Return the zero-based index of the highest best_validation_accuracy.
+
+    The provided comparison command validates that results contains every
+    configuration's completed, matching record in configuration-list order.
+    Break equal-score ties by retaining the earliest configuration in that list.
+    Reject an empty list with ValueError.
+    """
+    raise NotImplementedError("Implement select_configuration")
