@@ -1,0 +1,88 @@
+"""Provided plumbing for saving and loading a trained classifier."""
+from dataclasses import dataclass
+import json
+from pathlib import Path
+
+import torch
+
+from banking77.model import IntentClassifier
+
+
+BEST_MODEL = "best-model.pt"
+VOCABULARY = "vocabulary.json"
+LABELS = "labels.json"
+SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class SavedClassifier:
+    model: IntentClassifier
+    vocabulary: dict[str, int]
+    label_mapping: dict[str, int]
+    epoch: int
+    validation_accuracy: float
+
+
+def _write_json(path: Path, contents) -> None:
+    path.write_text(
+        json.dumps(contents, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def save_classifier(
+    directory: Path,
+    model: IntentClassifier,
+    model_settings: dict,
+    vocabulary: dict[str, int],
+    label_mapping: dict[str, int],
+    *,
+    epoch: int,
+    validation_accuracy: float,
+) -> None:
+    """Save the best-validation classifier with the mappings needed to reuse it."""
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_json(directory / VOCABULARY, vocabulary)
+    _write_json(directory / LABELS, label_mapping)
+    temporary = directory / (BEST_MODEL + ".tmp")
+    torch.save(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "epoch": epoch,
+            "validation_accuracy": validation_accuracy,
+            "model_settings": dict(model_settings),
+            "state_dict": {
+                name: tensor.detach().cpu().clone()
+                for name, tensor in model.state_dict().items()
+            },
+        },
+        temporary,
+    )
+    temporary.replace(directory / BEST_MODEL)
+
+
+def load_classifier(
+    directory: Path | str, device: torch.device | str = "cpu"
+) -> SavedClassifier:
+    """Rebuild a saved classifier in evaluation mode with its vocabulary and labels."""
+    directory = Path(directory)
+    for name in (BEST_MODEL, VOCABULARY, LABELS):
+        if not (directory / name).exists():
+            raise FileNotFoundError(f"{directory / name} is missing; train a classifier first")
+    checkpoint = torch.load(directory / BEST_MODEL, map_location=device, weights_only=True)
+    if checkpoint.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"{directory / BEST_MODEL}: unsupported checkpoint version")
+    vocabulary = json.loads((directory / VOCABULARY).read_text(encoding="utf-8"))
+    label_mapping = json.loads((directory / LABELS).read_text(encoding="utf-8"))
+    settings = checkpoint["model_settings"]
+    if (
+        settings["vocabulary_size"] != len(vocabulary)
+        or settings["num_labels"] != len(label_mapping)
+    ):
+        raise ValueError(f"{directory}: checkpoint does not match its vocabulary or labels")
+    model = IntentClassifier(**settings).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+    return SavedClassifier(
+        model, vocabulary, label_mapping,
+        checkpoint["epoch"], checkpoint["validation_accuracy"],
+    )
