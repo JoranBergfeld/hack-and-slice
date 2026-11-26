@@ -180,6 +180,22 @@ def validate_results(output: Path, *, allow_partial: bool = False) -> list[dict]
     return _validate_results(output, manifest, allow_partial=allow_partial)
 
 
+def expected_attempt(manifest: dict, index: int) -> dict:
+    """Job, compute and device expected for a configuration's latest attempt."""
+    recoveries = [entry for entry in manifest.get("recoveries", [])
+                  if entry["configuration_index"] == index]
+    if recoveries:
+        latest = recoveries[-1]
+        return {"job_name": latest["job_name"], "device": latest["device"],
+                "compute": latest["compute"],
+                "training_environment": latest["training_environment"],
+                "recovery": latest}
+    return {"job_name": f"banking77-{manifest['launch_id']}-{index}",
+            "device": manifest["device"], "compute": manifest.get("azure"),
+            "training_environment": manifest.get("training_environment"),
+            "recovery": None}
+
+
 def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
                       pending_run: tuple[int, Path] | None = None) -> list[dict]:
     """Validate a candidate download before exposing it as a collected result."""
@@ -226,6 +242,7 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
             if _hash(run / name) != digest:
                 raise ValueError(f"mismatched result for configuration {index + 1}: {name}")
         record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+        attempt = expected_attempt(manifest, index)
         if (record["schema_version"] != 1 or record["status"] != "completed"
                 or record["configuration"] != configuration
                 or record["provenance"] != {"launch_id": manifest["launch_id"],
@@ -233,23 +250,24 @@ def _validate_results(output: Path, manifest: dict, *, allow_partial: bool,
                                             "environment": manifest["environment"]}
                 or record["prepared"] != manifest["prepared"]
                 or record["seed"] != manifest["seed"] or record["seed"] != SEED
-                or record["device"] != manifest["device"]
+                or record["device"] != attempt["device"]
                 or record["device"] not in ("cpu", "cuda")
                 or record["software"] != (
                     manifest["results"][index]["software"]
                     if manifest.get("target") == "azure" else manifest["software"])):
             raise ValueError(f"mismatched launch provenance for configuration {index + 1}")
         if manifest.get("target") == "azure":
-            if (record.get("training_environment") != manifest["training_environment"]
-                    or record.get("compute") != manifest["azure"]
+            if (record.get("training_environment") != attempt["training_environment"]
+                    or record.get("compute") != attempt["compute"]
                     or record.get("job_name") != manifest["jobs"][index]["name"]
-                    or record.get("job_name") != f"banking77-{manifest['launch_id']}-{index}"):
+                    or record.get("job_name") != attempt["job_name"]
+                    or record.get("recovery") != attempt["recovery"]):
                 raise ValueError(f"mismatched Azure provenance for configuration {index + 1}")
             expected = manifest["software"]
             if (record["software"]["python"] != expected["python"]
                     or record["software"]["scikit-learn"] != expected["scikit-learn"]
                     or record["software"]["torch"] != expected["torch"].split("+")[0]
-                    + ("+cu124" if manifest["device"] == "cuda" else "+cpu")):
+                    + ("+cu124" if attempt["device"] == "cuda" else "+cpu")):
                 raise ValueError(f"mismatched Azure training software for configuration {index + 1}")
         settings = TrainingConfiguration(**configuration)
         settings.validate()
@@ -337,6 +355,18 @@ def main(argv=None, *, azure_service=None) -> int:
     for name in ("status", "collect"):
         inspect = commands.add_parser(name)
         inspect.add_argument("--launch", type=Path, required=True)
+    recover = commands.add_parser(
+        "recover", help="Explicitly resume or restart one failed Azure configuration")
+    recover.add_argument("--launch", type=Path, required=True)
+    recover.add_argument("--job", required=True, help="Failed Azure job name from status")
+    mode = recover.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--resume", action="store_true",
+                      help="Continue from the job's latest resumable snapshot")
+    mode.add_argument("--restart", action="store_true",
+                      help="Train this configuration again from epoch 1")
+    recover.add_argument("--azure-device", choices=("cpu", "gpu"),
+                         help="Explicit device change (e.g. CPU after GPU); default keeps it")
+    recover.add_argument("--instance-type", help="Required with --azure-device")
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "launch":
@@ -351,6 +381,9 @@ def main(argv=None, *, azure_service=None) -> int:
                        examples=arguments.examples)
         elif arguments.command == "select":
             select(arguments.launch)
+        elif arguments.command == "recover":
+            from banking77.azure import recover_azure
+            recover_azure(arguments, service=azure_service)
         else:
             from banking77.azure import inspect_azure
             inspect_azure(arguments.launch, collect=arguments.command == "collect",

@@ -2,8 +2,10 @@
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
+import random
 from typing import Callable
 
 import sklearn
@@ -11,6 +13,8 @@ import torch
 
 SEED = 42
 RUN_RECORD = "run.json"
+LATEST_SNAPSHOT = "latest-snapshot.pt"
+SNAPSHOT_VERSION = 1
 PREPARED_FILES = (
     "training.json", "validation.json", "vocabulary.json", "labels.json", "metadata.json",
 )
@@ -58,6 +62,35 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, dict):
+        return {key: _to_cpu(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_to_cpu(item) for item in value)
+    return value
+
+
+def _save_durably(contents: dict, path: Path) -> None:
+    """Replace path only after the complete file has reached the disk."""
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as handle:
+        torch.save(contents, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+
+
+def load_snapshot(path: Path | str) -> dict:
+    """Read a latest resumable snapshot written by run_training."""
+    snapshot = torch.load(path, map_location="cpu", weights_only=True)
+    if (not isinstance(snapshot, dict) or snapshot.get("kind") != "latest-resumable-snapshot"
+            or snapshot.get("schema_version") != SNAPSHOT_VERSION):
+        raise ValueError(f"{path}: not a supported latest resumable snapshot")
+    return snapshot
+
+
 def run_training(
     configuration: TrainingConfiguration,
     prepared: Path,
@@ -67,8 +100,14 @@ def run_training(
     examples: int = 5,
     log: Callable[[str], None] = print,
     target: str = "local CPU",
+    resume: Path | None = None,
+    identity: dict | None = None,
 ) -> dict:
-    """Train one configuration, save its best-validation classifier and run record."""
+    """Train one configuration, save its best-validation classifier and run record.
+
+    After every completed epoch a separate latest resumable snapshot is saved.
+    resume continues the same run from such a snapshot in a new output folder.
+    """
     from banking77.checkpoint import load_classifier, save_classifier
     from banking77.data import Message
     from banking77.model import IntentClassifier, collate_batch
@@ -97,10 +136,12 @@ def run_training(
         "dropout": configuration.dropout,
         "num_labels": len(label_mapping),
     }
+    prepared_sha256 = {name: _sha256(prepared / name) for name in PREPARED_FILES}
     model = IntentClassifier(**model_settings).to(device)
+    data_order = torch.Generator().manual_seed(SEED)
     training_loader = build_loader(
         training, vocabulary, label_mapping, configuration.batch_size,
-        shuffle=True, generator=torch.Generator().manual_seed(SEED),
+        shuffle=True, generator=data_order,
     )
     validation_loader = build_loader(
         validation, vocabulary, label_mapping, configuration.batch_size, shuffle=False,
@@ -113,33 +154,99 @@ def run_training(
         f"Settings: {asdict(configuration)}"
     )
     history, accuracies = [], []
-    best_epoch, stopped_early = 0, False
-    for epoch in range(1, configuration.max_epochs + 1):
+    best_epoch, best_state, stop, resumed = 0, None, False, None
+    if resume is not None:
+        snapshot = load_snapshot(resume)
+        if (snapshot["configuration"] != asdict(configuration)
+                or snapshot["model_settings"] != model_settings
+                or snapshot["seed"] != SEED or snapshot["prepared_sha256"] != prepared_sha256
+                or snapshot["identity"] != identity):
+            raise ValueError(f"{resume}: snapshot belongs to a different run, "
+                             "configuration or prepared data")
+        model.load_state_dict(snapshot["model_state"])
+        optimizer.load_state_dict(snapshot["optimizer_state"])
+        history = [dict(entry) for entry in snapshot["history"]]
+        accuracies = [entry["validation_accuracy"] for entry in history]
+        best_epoch = snapshot["best"]["epoch"]
+        best_state = snapshot["best"]["state_dict"]
+        stop = snapshot["early_stopping"]["stop"]
+        best = IntentClassifier(**model_settings)
+        best.load_state_dict(best_state)
+        save_classifier(
+            output, best, model_settings, vocabulary, label_mapping,
+            epoch=best_epoch, validation_accuracy=accuracies[best_epoch - 1],
+        )
+        # Restore randomness last: building the classifier above consumes it.
+        randomness = snapshot["random_state"]
+        torch.set_rng_state(randomness["torch_cpu"])
+        data_order.set_state(randomness["data_order"])
+        random.setstate(randomness["python"])
+        if device.type == "cuda" and snapshot["device"] == "cuda" and randomness["torch_cuda"]:
+            torch.cuda.set_rng_state_all(randomness["torch_cuda"])
+        resumed = {"after_epoch": len(history), "snapshot_device": snapshot["device"]}
+        log(
+            f"Resuming after epoch {len(history)} from the latest snapshot "
+            f"(trained on {snapshot['device']}); best validation "
+            f"{accuracies[best_epoch - 1]:.4f} at epoch {best_epoch}."
+        )
+        if snapshot["device"] != device.type:
+            log(f"Continuing on {device.type} after {snapshot['device']}: results are "
+                "valid but not guaranteed bit-for-bit identical across devices.")
+    for epoch in range(len(history) + 1, configuration.max_epochs + 1):
+        if stop:
+            break
         loss = float(train_epoch(model, training_loader, optimizer, device))
         accuracy = float(validation_accuracy(model, validation_loader, device))
         history.append(
-            {"epoch": epoch, "training_loss": loss, "validation_accuracy": accuracy}
+            {"epoch": epoch, "training_loss": loss, "validation_accuracy": accuracy,
+             "device": device.type}
         )
         accuracies.append(accuracy)
         best_epoch, stop = early_stopping(accuracies, configuration.patience)
         improved = best_epoch == epoch
         if improved:
+            best_state = _to_cpu(model.state_dict())
             save_classifier(
                 output, model, model_settings, vocabulary, label_mapping,
                 epoch=epoch, validation_accuracy=accuracy,
             )
+        output.mkdir(parents=True, exist_ok=True)
+        _save_durably({
+            "schema_version": SNAPSHOT_VERSION,
+            "kind": "latest-resumable-snapshot",
+            "identity": identity,
+            "configuration": asdict(configuration),
+            "model_settings": model_settings,
+            "seed": SEED,
+            "prepared_sha256": prepared_sha256,
+            "device": device.type,
+            "completed_epoch": epoch,
+            "history": history,
+            "best": {"epoch": best_epoch, "validation_accuracy": accuracies[best_epoch - 1],
+                     "state_dict": best_state},
+            "early_stopping": {"patience": configuration.patience,
+                               "epochs_without_improvement": epoch - best_epoch,
+                               "stop": stop},
+            "model_state": _to_cpu(model.state_dict()),
+            "optimizer_state": _to_cpu(optimizer.state_dict()),
+            "random_state": {
+                "torch_cpu": torch.get_rng_state(),
+                "torch_cuda": (_to_cpu(torch.cuda.get_rng_state_all())
+                               if device.type == "cuda" else []),
+                "data_order": data_order.get_state(),
+                "python": random.getstate(),
+            },
+        }, output / LATEST_SNAPSHOT)
         log(
             f"Epoch {epoch}/{configuration.max_epochs}: training loss {loss:.4f}, "
             f"validation accuracy {accuracy:.4f}" + (" (best)" if improved else "")
         )
-        if stop:
-            stopped_early = epoch < configuration.max_epochs
-            if stopped_early:
-                log(
-                    f"Early stopping after epoch {epoch}: no validation improvement "
-                    f"for {epoch - best_epoch} epochs."
-                )
-            break
+    stopped_early = stop and len(history) < configuration.max_epochs
+    if stopped_early:
+        log(
+            f"Early stopping after epoch {len(history)}: no validation improvement "
+            f"for {len(history) - best_epoch} epochs."
+        )
 
     saved = load_classifier(output, device)
     if saved.epoch != best_epoch:
@@ -172,9 +279,11 @@ def run_training(
         "best_validation_accuracy": accuracies[best_epoch - 1],
         "stopped_early": stopped_early,
         "checkpoint": "best-model.pt",
+        "latest_snapshot": LATEST_SNAPSHOT,
+        "resumed": resumed,
         "prepared": {
             "metadata": contents["metadata.json"],
-            "sha256": {name: _sha256(prepared / name) for name in PREPARED_FILES},
+            "sha256": prepared_sha256,
         },
         "software": {
             "python": platform.python_version(),

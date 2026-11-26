@@ -21,6 +21,11 @@ Alternatively choose Azure ML CPU or GPU explicitly: submit independent
 Standard-tier serverless jobs with the same captured participant code, inspect
 status/log links, collect completed outputs while other jobs are pending or
 failed, then use the same local selection/evaluation/prediction workflow.
+Training saves a latest resumable snapshot after every epoch, separate from the
+best-validation classifier, so an interrupted Azure configuration can be
+explicitly resumed (or restarted) with `python -m banking77.compare recover`,
+optionally continuing a GPU configuration on CPU, without touching completed
+results.
 The guide covers existing workspace access, authentication, quota, charges and
 cleanup; the helper does not provision or delete shared Azure resources.
 

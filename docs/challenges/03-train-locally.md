@@ -108,6 +108,7 @@ the classifier later:
 | File | Contents |
 |---|---|
 | `best-model.pt` | Best-validation epoch, validation accuracy, model settings, and `state_dict` |
+| `latest-snapshot.pt` | Latest resumable snapshot, replaced after every completed epoch (see below) |
 | `vocabulary.json` | The prepared vocabulary used for training |
 | `labels.json` | The prepared intent-to-index mapping |
 | `run.json` | Configuration, seed, device, per-epoch history, best epoch and validation accuracy, early-stopping outcome, prepared-data identity, software versions, and the example predictions |
@@ -117,6 +118,22 @@ classifier with its vocabulary and labels on CPU. Training refuses to replace
 a completed run: choose a new `--output` for each run. Missing prepared files,
 invalid settings, and unfinished functions are reported with a pointer back to
 this checkpoint.
+
+Two different files are saved, for different purposes:
+
+- `best-model.pt` is the **best-validation checkpoint**. It changes only when
+  validation accuracy improves and is what selection, evaluation and prediction
+  use.
+- `latest-snapshot.pt` is the **latest resumable snapshot**. The provided
+  training loop replaces it durably after **every** completed epoch, even when
+  validation got worse. It holds everything needed to continue training as if
+  nothing happened: model and optimizer state, the completed epoch and history,
+  the best epoch and its weights, early-stopping progress, the random-number
+  state (data order, dropout), the configuration and the prepared-data identity.
+  It is never used to choose or evaluate a model.
+
+Keep both: after a later interruption, the latest snapshot may be at epoch 3
+while the best model is still the one from epoch 2.
 
 ## Compare your configurations
 
@@ -184,8 +201,9 @@ and validation score. Do not tune using the official held-out test set.
 
 Never reuse an output directory, even after a failure: choose a new launch
 folder. Completed configurations from a failed launch remain available for
-inspection but cannot produce a winner. Interrupted launches remain incomplete.
-Recovery/resume snapshots are a later checkpoint, not part of this command.
+inspection but cannot produce a winner. Interrupted local launches remain
+incomplete; explicit recovery of a single failed configuration is available for
+Azure launches (see [Recover an interrupted Azure job](#recover-an-interrupted-azure-job)).
 
 ## Run the same comparison on Azure ML
 
@@ -272,7 +290,7 @@ Repeat collection later to pick up newly completed jobs; already validated
 results are preserved. The four result files have the same local shape as
 local runs, with additional original job, compute, environment and launch
 provenance. Keep the entire launch folder intact, including `source/`,
-`prepared/`, `submission/` and `launch.json`. Changing participant code or your
+`prepared/`, `submission/`, `recoveries/` and `launch.json`. Changing participant code or your
 configuration file after submission does not change these jobs or their
 comparison.
 
@@ -295,9 +313,54 @@ while choosing configurations.
 A failed setup or submission retains its original launch metadata and any
 submitted job names; other independent submissions are still attempted. If a
 network submission was ambiguous, inspect the recorded job name in your
-workspace before doing anything else. No automatic resubmission, snapshots or
-resume are implemented here; recovery is separate work. A new comparison must
-use a new output directory and gets a new launch identity.
+workspace before doing anything else. Nothing is resubmitted automatically. A
+new comparison must use a new output directory and gets a new launch identity.
+
+### Recover an interrupted Azure job
+
+Long jobs can be preempted, hit a node failure or be canceled. Because the
+worker writes its latest resumable snapshot to the job's output after every
+completed epoch, an interrupted configuration does not have to start over.
+Recovery is always **explicit** and affects **only the configuration you name**:
+
+```powershell
+python -m banking77.compare status --launch runs/azure-comparison-1
+python -m banking77.compare recover --launch runs/azure-comparison-1 --job FAILED_JOB_NAME --resume
+```
+
+`--resume` downloads the failed job's outputs, checks that its
+`latest-snapshot.pt` belongs to this launch, configuration and prepared data,
+prints the last completed epoch and the best validation result so far, and
+submits a new job named `...-<index>-r1` (then `-r2`, ...). That job runs the
+**same captured code and data** as the original launch, not your current
+working copy, and continues from the next epoch with the restored model,
+optimizer, best checkpoint, early-stopping progress and randomness. On the same
+CPU setup a resumed run matches an uninterrupted one. Use `--restart` instead
+to train that configuration again from epoch 1, for example when the job failed
+before finishing its first epoch (resume then refuses with "no usable latest
+resumable snapshot") or never started.
+
+Recovery refuses jobs that are still queued/running, already completed or
+collected, or not the current job of a configuration in this launch. Completed
+configurations, their collected results and the original launch ID are kept;
+`launch.json` records each attempt under `recoveries`. Afterwards use `status`
+and `collect` as usual; the collected `run.json` records the recovery (mode,
+failed job, epoch resumed after, previous device), and each history entry
+records the device that trained that epoch.
+
+The recovered job keeps the original CPU/GPU choice and VM size by default.
+If GPU quota or capacity is gone you may **explicitly** continue a GPU
+configuration on CPU; both options are required and nothing switches silently:
+
+```powershell
+python -m banking77.compare recover --launch runs/azure-comparison-1 --job FAILED_JOB_NAME --resume --azure-device cpu --instance-type Standard_D2s_v3
+```
+
+That job uses the CPU PyTorch build and CPU compute and is recorded as such.
+The result is valid, but there is **no guarantee** that it is bit-for-bit
+identical to an uninterrupted GPU run (GPU and CPU arithmetic differ), and the
+remaining epochs on CPU can be slower. A recovery job is still paid compute;
+cancel it like any other job when no longer needed.
 
 ### Quota, charges and cleanup
 
@@ -318,9 +381,11 @@ compute resources. The helper only submits/inspects/downloads jobs; it never
 provisions or deletes shared Azure resources.
 
 Automated tests run tiny synthetic data through a fake external Azure service,
-including independent submissions, partial collection, failures and local
-completion. They do **not** verify a live service, GPU training, authentication,
-quota or charges. A live smoke check is optional and must be reported separately.
+including independent submissions, partial collection, failures, hard-killed
+(interrupted) jobs with explicit resume/restart, CPU-after-GPU recovery and
+local completion. They do **not** verify a live service, GPU training,
+authentication, quota or charges. A live smoke check is optional and must be
+reported separately.
 
 After selecting, continue with [Checkpoint 4: Final evaluation](04-evaluate-classifier.md).
 Only then use the held-out test set; early examples and comparison must remain

@@ -29,6 +29,33 @@ def _show(job: dict) -> None:
         print(f"  Error: {job['error']}", flush=True)
 
 
+def _training_environment(output: Path, software: dict, azure_device: str) -> dict:
+    """Image plus conda definition with the torch build for the chosen device."""
+    torch_version = software["torch"].split("+")[0]
+    build = "cu124" if azure_device == "gpu" else "cpu"
+    requirements = output / "source" / "requirements.txt"
+    extra_packages = []
+    if requirements.is_file():
+        for line in requirements.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(("-", ".")) or " @ " in line:
+                raise ValueError("Azure requirements must be package specifiers, not local files/options")
+            if not re.match(r"^(torch|scikit-learn)\s*(==|>=|<=|~=|!=|>|<|$)", line):
+                extra_packages.append(line)
+    return {
+        "image": "mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
+        "conda": {"name": "banking77", "channels": ["conda-forge"],
+                  "dependencies": [
+                      f"python={software['python']}", "pip",
+                      {"pip": [f"--extra-index-url https://download.pytorch.org/whl/{build}",
+                               f"torch=={torch_version}+{build}",
+                               f"scikit-learn=={software['scikit-learn']}", *extra_packages]},
+                  ]},
+    }
+
+
 def launch_azure(arguments, *, service: AzureService | None = None) -> None:
     for option in ("azure_device", "instance_type", "subscription", "resource_group", "workspace"):
         if not getattr(arguments, option):
@@ -44,30 +71,8 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
                "instance_type": arguments.instance_type, "tier": "Standard"},
     )
     # Capture the exact environment definition alongside the submitted code.
-    software = manifest["software"]
-    torch_version = software["torch"].split("+")[0]
-    build = "cu124" if arguments.azure_device == "gpu" else "cpu"
-    requirements = output / "source" / "requirements.txt"
-    extra_packages = []
-    if requirements.is_file():
-        for line in requirements.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith(("-", ".")) or " @ " in line:
-                raise ValueError("Azure requirements must be package specifiers, not local files/options")
-            if not re.match(r"^(torch|scikit-learn)\s*(==|>=|<=|~=|!=|>|<|$)", line):
-                extra_packages.append(line)
-    manifest["training_environment"] = {
-        "image": "mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
-        "conda": {"name": "banking77", "channels": ["conda-forge"],
-                  "dependencies": [
-                      f"python={software['python']}", "pip",
-                      {"pip": [f"--extra-index-url https://download.pytorch.org/whl/{build}",
-                               f"torch=={torch_version}+{build}",
-                               f"scikit-learn=={software['scikit-learn']}", *extra_packages]},
-                  ]},
-    }
+    manifest["training_environment"] = _training_environment(
+        output, manifest["software"], arguments.azure_device)
     _write(output / "launch.json", manifest)
     bundle = output / "submission"
     shutil.copytree(output / "source", bundle)
@@ -167,6 +172,112 @@ def inspect_azure(output: Path, *, collect: bool, service: AzureService | None =
         raise RuntimeError("; ".join(failures))
 
 
+RECOVERABLE = ("Failed", "Canceled", "SubmissionFailed")
+
+
+def recover_azure(arguments, *, service: AzureService | None = None) -> None:
+    """Explicitly resume or restart only one failed configuration of an Azure launch."""
+    from banking77.compare import expected_attempt
+    from banking77.runner import LATEST_SNAPSHOT, load_snapshot
+    output = arguments.launch.resolve()
+    manifest = json.loads((output / "launch.json").read_text(encoding="utf-8"))
+    if manifest.get("target") != "azure":
+        raise ValueError("recover requires an Azure launch")
+    validate_results(output, allow_partial=True)
+    names = [job["name"] for job in manifest["jobs"]]
+    if arguments.job not in names:
+        raise ValueError(f"{arguments.job} is not the current job of any configuration "
+                         "in this launch")
+    index = names.index(arguments.job)
+    if manifest["results"][index] is not None:
+        raise ValueError(f"{arguments.job} already has a collected result; nothing to recover")
+    if bool(arguments.azure_device) != bool(arguments.instance_type):
+        raise ValueError("--azure-device and --instance-type must be given together; no fallback")
+    service = service or MLService(manifest["azure"], manifest["training_environment"])
+    job = manifest["jobs"][index]
+    if job["status"] != "SubmissionFailed":
+        job = service.inspect(arguments.job)
+        if job["name"] != arguments.job:
+            raise ValueError("Azure status returned a different job identifier")
+        manifest["jobs"][index] = job
+    if job["status"] not in RECOVERABLE:
+        raise ValueError(f"{arguments.job} is {job['status']}; only Failed or Canceled "
+                         "configurations can be recovered")
+    previous = expected_attempt(manifest, index)
+    if arguments.azure_device:
+        device = "cuda" if arguments.azure_device == "gpu" else "cpu"
+        compute = {**manifest["azure"], "device": arguments.azure_device,
+                   "instance_type": arguments.instance_type}
+        environment = {**manifest["training_environment"],
+                       "conda": _training_environment(output, manifest["software"],
+                                                      arguments.azure_device)["conda"]}
+    else:
+        device, compute = previous["device"], previous["compute"]
+        environment = previous["training_environment"]
+    attempt = 1 + sum(entry["configuration_index"] == index
+                      for entry in manifest.get("recoveries", []))
+    name = f"banking77-{manifest['launch_id']}-{index}-r{attempt}"
+    bundle = output / "recoveries" / f"{index}-r{attempt}"
+    if bundle.exists():
+        raise FileExistsError(f"{bundle} already exists")
+    with tempfile.TemporaryDirectory(prefix="recover-", dir=output) as temporary:
+        snapshot, entry = None, {
+            "configuration_index": index, "mode": "resume" if arguments.resume else "restart",
+            "attempt": attempt, "failed_job": arguments.job, "job_name": name,
+            "device": device, "compute": compute, "training_environment": environment,
+            "from_device": previous["device"], "resumed_after_epoch": None,
+            "snapshot_sha256": None,
+        }
+        if arguments.resume:
+            if job["status"] == "SubmissionFailed":
+                raise ValueError(f"{arguments.job} never started; use --restart")
+            try:
+                downloaded = service.download(arguments.job, Path(temporary) / "download")
+                snapshot = downloaded / LATEST_SNAPSHOT
+                state = load_snapshot(snapshot)
+            except (OSError, RuntimeError, ValueError, KeyError, EOFError,
+                    pickle.UnpicklingError) as error:
+                raise ValueError(f"{arguments.job} has no usable latest resumable snapshot "
+                                 f"({error}); use --restart to train it again from epoch 1"
+                                 ) from error
+            if (state["identity"] != {"launch_id": manifest["launch_id"],
+                                      "configuration_index": index}
+                    or state["configuration"] != manifest["configurations"][index]
+                    or state["prepared_sha256"] != manifest["prepared"]["sha256"]):
+                raise ValueError(f"{arguments.job}: latest snapshot belongs to a different "
+                                 "launch, configuration or prepared data")
+            best = state["best"]
+            entry.update(resumed_after_epoch=state["completed_epoch"],
+                         from_device=state["device"], snapshot_sha256=_hash(snapshot))
+            print(f"Latest resumable snapshot: after epoch {state['completed_epoch']} on "
+                  f"{state['device']}; best validation {best['validation_accuracy']:.4f} "
+                  f"at epoch {best['epoch']}.", flush=True)
+            if state["device"] != device:
+                print(f"Continuing on {device} after {state['device']}: valid, but not "
+                      "guaranteed bit-for-bit identical to an uninterrupted run.", flush=True)
+        shutil.copytree(output / "submission", bundle)
+        if snapshot is not None:
+            shutil.copy2(snapshot, bundle / LATEST_SNAPSHOT)
+    _write(bundle / "recovery.json", entry)
+    _write(bundle / "environment.json", environment["conda"])
+    manifest.setdefault("recoveries", []).append(entry)
+    manifest["jobs"][index] = {"name": name, "status": "Submitting", "error": None}
+    _write(output / "launch.json", manifest)
+    print(f"Target: Azure ML {compute['device'].upper()}, {compute['instance_type']}, "
+          "Standard tier", flush=True)
+    try:
+        submitted = service.submit(bundle, name, index, compute)
+    except (RuntimeError, OSError, ValueError) as error:
+        submitted = {"name": name, "status": "SubmissionFailed", "error": str(error)}
+    manifest["jobs"][index] = submitted
+    _write(output / "launch.json", manifest)
+    print(f"Recovering configuration {index + 1} ({entry['mode']}) as {name}; "
+          f"replaces {arguments.job}. Completed configurations are unchanged.", flush=True)
+    _show(submitted)
+    if submitted["status"] == "SubmissionFailed":
+        raise RuntimeError(f"{name}: {submitted['error']}; recover again when resolved")
+
+
 class MLService:
     """Real SDK v2 adapter; never creates/deletes a workspace or compute cluster."""
 
@@ -205,8 +316,10 @@ class MLService:
             is_deterministic=False,
             command=f'python -u -m banking77.azure_worker --index {index} '
                     '--output "${{outputs.results}}"',
-            environment=Environment(image=self.environment["image"],
-                                    conda_file=self.environment["conda"]),
+            environment=Environment(
+                image=self.environment["image"],
+                # Per bundle: a recovery may explicitly switch the torch build.
+                conda_file=json.loads((bundle / "environment.json").read_text(encoding="utf-8"))),
             resources=JobResourceConfiguration(instance_type=compute["instance_type"],
                                                instance_count=1),
             queue_settings=QueueSettings(job_tier="Standard"),
