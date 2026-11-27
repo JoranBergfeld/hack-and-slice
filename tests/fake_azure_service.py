@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import sys
 
+from banking77.azure import AzureJobNotFoundError
+
 
 class FakeAzure:
     def __init__(self, root):
@@ -25,7 +27,10 @@ class FakeAzure:
         return info
 
     def inspect(self, name):
-        return json.loads((self.root / name / "info.json").read_text())
+        path = self.root / name / "info.json"
+        if not path.is_file():
+            raise AzureJobNotFoundError(f"synthetic Azure job {name} was not found")
+        return json.loads(path.read_text())
 
     def download(self, name, destination):
         shutil.copytree(self.root / name / "results", destination)

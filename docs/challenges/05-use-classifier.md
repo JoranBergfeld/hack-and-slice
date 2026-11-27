@@ -55,11 +55,14 @@ the launch folder). For example, if it says `"run": "runs/1"`:
 python -m banking77.predict --model runs/comparison-1/runs/1 --message "Why hasn't my refund arrived?"
 ```
 
-The command loads `best-model.pt`, `vocabulary.json` and `labels.json` using
-`banking77.checkpoint.load_classifier`, then prints `Predicted intent: ...`.
-It uses local CPU and does not load the test set or write into the training
-artifacts. Missing files, malformed mappings, incompatible weights, unfinished
-functions and invalid predicted labels produce clear errors pointing here.
+For a comparison run, the command verifies the selected run and loads its model
+and encoder from the source captured at launch, while running your current
+`predict_intent` implementation. For a standalone run, it loads the artifacts
+with the current `banking77.checkpoint.load_classifier`. It prints
+`Predicted intent: ...`, uses local CPU, and does not load the test set or write
+into training artifacts. Missing files, malformed mappings, incompatible or
+non-finite weights, unfinished functions and invalid predicted labels produce
+clear errors pointing here.
 The command also accepts a saved single-run directory, but for the guided
 exercise use the winner you already selected, not a run chosen by test scores.
 Demonstration prediction is a separate operation; it does not rerun evaluation.

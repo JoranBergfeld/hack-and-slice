@@ -95,7 +95,8 @@ save_classifier(Path("saved"), model, settings,
 
     def test_invalid_saved_artifacts_and_invalid_participant_predictions_are_actionable(self):
         saved = self.saved_fixture()
-        for case in ("missing", "weights", "json", "labels", "unknown", "vocabulary"):
+        for case in ("missing", "weights", "json", "labels", "unknown", "vocabulary",
+                     "nonfinite"):
             with self.subTest(case=case):
                 directory = self.workspace / case
                 shutil.copytree(saved, directory)
@@ -111,15 +112,22 @@ save_classifier(Path("saved"), model, settings,
                 elif case == "unknown":
                     (directory / "vocabulary.json").write_text(json.dumps(
                         {"refund": 0, "cash": 1, "other": 2}))
-                else:
+                elif case == "vocabulary":
                     (directory / "vocabulary.json").write_text(json.dumps(
                         {"<unk>": 0, "refund": -1, "cash": 2}))
+                else:
+                    import torch
+                    checkpoint = torch.load(directory / "best-model.pt", weights_only=True)
+                    checkpoint["state_dict"]["embeddings.weight"][2, 0] = float("nan")
+                    torch.save(checkpoint, directory / "best-model.pt")
                 result = run_cli("banking77.predict", "--model", case,
                                  "--message", "refund", cwd=self.workspace)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn("Prediction failed:", result.stderr)
                 self.assertIn(CHALLENGE, result.stderr)
                 self.assertNotIn("Predicted intent:", result.stdout)
+                if case == "nonfinite":
+                    self.assertIn("non-finite checkpoint parameters", result.stderr)
         module = self.workspace / "banking77/prediction.py"
         module.write_text(module.read_text() + (
             "\ndef predict_intent(saved, text):\n    return 'not-an-official-intent'\n"

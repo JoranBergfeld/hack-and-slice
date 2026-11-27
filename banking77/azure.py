@@ -15,8 +15,13 @@ from banking77.compare import (
 from banking77.artifacts import file_sha256, launch_lock, write_json
 from banking77.azure_settings import job_name, torch_build, torch_device
 from banking77.captured import captured_modules
+from banking77.runner import LATEST_SNAPSHOT
 
 RECOVERABLE = ("Failed", "Canceled", "SubmissionFailed")
+
+
+class AzureJobNotFoundError(RuntimeError):
+    """Azure confirmed that a submitted job name does not exist."""
 
 
 class AzureService(Protocol):
@@ -36,6 +41,56 @@ def _show(job: dict) -> None:
     if job.get("collection_error"):
         print(f"  Collection error: {job['collection_error']}; "
               "retry collect or explicitly recover with --restart/--resume.", flush=True)
+
+
+def _verified_tree(directory: Path, expected: dict) -> bool:
+    if not directory.is_dir():
+        return False
+    paths = list(directory.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        return False
+    actual = {
+        path.relative_to(directory).as_posix(): file_sha256(path)
+        for path in paths if path.is_file()
+    }
+    return actual == expected
+
+
+def _recovery_bundle_matches(
+    bundle: Path, manifest: dict, entry: dict, environment: dict
+) -> bool:
+    try:
+        bundled_manifest = json.loads((bundle / "launch.json").read_text(encoding="utf-8"))
+        for key in ("schema_version", "launch_id", "target", "configurations", "seed",
+                    "device", "examples", "software", "environment", "source", "prepared",
+                    "azure", "training_environment"):
+            if bundled_manifest.get(key) != manifest.get(key):
+                return False
+        if json.loads((bundle / "recovery.json").read_text(encoding="utf-8")) != entry:
+            return False
+        if json.loads((bundle / "environment.json").read_text(encoding="utf-8")) != environment:
+            return False
+        source_files = {}
+        metadata = {"launch.json", "recovery.json", "environment.json", LATEST_SNAPSHOT}
+        for path in bundle.rglob("*"):
+            if path.is_symlink():
+                return False
+            if not path.is_file():
+                continue
+            relative = path.relative_to(bundle).as_posix()
+            if relative.startswith("prepared/") or relative in metadata:
+                continue
+            source_files[relative] = file_sha256(path)
+        if source_files != manifest["source"]["sha256"]:
+            return False
+        if not _verified_tree(bundle / "prepared", manifest["prepared"]["sha256"]):
+            return False
+        snapshot = bundle / LATEST_SNAPSHOT
+        if entry["snapshot_sha256"] is None:
+            return not snapshot.exists()
+        return snapshot.is_file() and file_sha256(snapshot) == entry["snapshot_sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _training_environment(output: Path, software: dict, azure_device: str) -> dict:
@@ -183,8 +238,10 @@ def _inspect_azure_locked(
                     run = output / "runs" / str(index)
                     run.parent.mkdir(exist_ok=True)
                     if run.exists():
-                        raise FileExistsError(f"{run} already exists but is not a validated result")
-                    downloaded.rename(run)
+                        validate_manifest_results(output, candidate, allow_partial=True,
+                                                  pending_run=(index, run))
+                    else:
+                        downloaded.rename(run)
                     manifest["results"][index] = candidate["results"][index]
                     job.pop("collection_error", None)
                     progress = run / "progress.log"
@@ -259,12 +316,24 @@ def _recover_azure_locked(
     service = service or MLService(manifest["azure"], manifest["training_environment"])
     job = manifest["jobs"][index]
     collection_error = job.get("collection_error")
+    confirmed_not_found = False
     if job["status"] != "SubmissionFailed":
         job = service.inspect(arguments.job)
         if job["name"] != arguments.job:
             raise ValueError("Azure status returned a different job identifier")
         manifest["jobs"][index] = job
+    else:
+        try:
+            job = service.inspect(arguments.job)
+        except AzureJobNotFoundError:
+            confirmed_not_found = True
+        else:
+            if job["name"] != arguments.job:
+                raise ValueError("Azure status returned a different job identifier")
+            manifest["jobs"][index] = job
     if (job["status"] not in RECOVERABLE
+            and not (confirmed_not_found and
+                     manifest["jobs"][index]["status"] == "SubmissionFailed")
             and not (job["status"] == "Completed" and collection_error)):
         raise ValueError(f"{arguments.job} is {job['status']}; only Failed or Canceled "
                          "jobs, failed submissions, or Completed jobs whose output was "
@@ -284,8 +353,6 @@ def _recover_azure_locked(
                       for entry in manifest.get("recoveries", []))
     name = job_name(manifest["launch_id"], index, attempt=attempt)
     bundle = output / "recoveries" / f"{index}-r{attempt}"
-    if bundle.exists():
-        raise FileExistsError(f"{bundle} already exists")
     with tempfile.TemporaryDirectory(prefix="recover-", dir=output) as temporary:
         snapshot, entry = None, {
             "configuration_index": index, "mode": "resume" if arguments.resume else "restart",
@@ -304,7 +371,7 @@ def _recover_azure_locked(
                     / LATEST_SNAPSHOT
                 )
             try:
-                if job["status"] != "SubmissionFailed":
+                if job["status"] != "SubmissionFailed" and not confirmed_not_found:
                     downloaded = service.download(
                         arguments.job, Path(temporary) / "download")
                     snapshot = downloaded / LATEST_SNAPSHOT
@@ -348,11 +415,25 @@ def _recover_azure_locked(
             if state["device"] != device:
                 print(f"Continuing on {device} after {state['device']}: valid, but not "
                       "guaranteed bit-for-bit identical to an uninterrupted run.", flush=True)
-        shutil.copytree(output / "submission", bundle)
-        if snapshot is not None:
-            shutil.copy2(snapshot, bundle / LATEST_SNAPSHOT)
-    write_json(bundle / "recovery.json", entry)
-    write_json(bundle / "environment.json", environment["conda"])
+        bundle.parent.mkdir(exist_ok=True)
+        if bundle.exists():
+            if not _recovery_bundle_matches(bundle, manifest, entry, environment["conda"]):
+                raise FileExistsError(
+                    f"{bundle} already exists but does not match this recovery attempt"
+                )
+        else:
+            with tempfile.TemporaryDirectory(
+                prefix=f".{bundle.name}-", dir=bundle.parent
+            ) as staging:
+                staged_bundle = Path(staging) / "bundle"
+                shutil.copytree(output / "source", staged_bundle)
+                shutil.copytree(output / "prepared", staged_bundle / "prepared")
+                write_json(staged_bundle / "launch.json", manifest)
+                write_json(staged_bundle / "recovery.json", entry)
+                write_json(staged_bundle / "environment.json", environment["conda"])
+                if snapshot is not None:
+                    shutil.copy2(snapshot, staged_bundle / LATEST_SNAPSHOT)
+                staged_bundle.rename(bundle)
     manifest.setdefault("recoveries", []).append(entry)
     manifest["jobs"][index] = {"name": name, "status": "Submitting", "error": None}
     write_json(output / "launch.json", manifest)
@@ -437,9 +518,11 @@ class MLService:
                 "error": str(job.error) if getattr(job, "error", None) else None}
 
     def inspect(self, name: str) -> dict:
-        from azure.core.exceptions import AzureError
+        from azure.core.exceptions import AzureError, ResourceNotFoundError
         try:
             return self._info(self.client.jobs.get(name))
+        except ResourceNotFoundError as error:
+            raise AzureJobNotFoundError(f"Azure job {name} was not found: {error}") from error
         except AzureError as error:
             raise RuntimeError(f"Azure status failed for {name}: {error}") from error
 

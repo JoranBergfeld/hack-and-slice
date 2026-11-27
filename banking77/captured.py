@@ -9,8 +9,10 @@ import sys
 def captured_modules(source: Path, names: tuple[str, ...]):
     package = importlib.import_module("banking77")
     previous_path = list(package.__path__)
+    previous_dont_write_bytecode = sys.dont_write_bytecode
     previous_modules = {}
     package.__path__ = [str((source / "banking77").resolve()), *previous_path]
+    sys.dont_write_bytecode = True
     try:
         for name in names:
             module_name = f"banking77.{name}"
@@ -28,3 +30,4 @@ def captured_modules(source: Path, names: tuple[str, ...]):
             if previous is not None:
                 sys.modules[module_name] = previous
         package.__path__ = previous_path
+        sys.dont_write_bytecode = previous_dont_write_bytecode

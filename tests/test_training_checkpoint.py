@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import csv
 import json
@@ -234,6 +235,40 @@ class TrainingCheckpointTests(unittest.TestCase):
         )
         self.assertEqual(comparison.returncode, 0, comparison.stderr)
         self.assertEqual(comparison.stdout.strip(), "[True, False] 2")
+
+    def test_concurrent_runs_cannot_overwrite_the_same_output_directory(self):
+        self.install_documented_solution()
+        self.prepare_synthetic_data()
+        training = self.workspace / "banking77/training.py"
+        training.write_text(training.read_text() + (
+            "\nimport time\n"
+            "_unlocked_train_epoch = train_epoch\n"
+            "def train_epoch(*args):\n"
+            "    time.sleep(0.5)\n"
+            "    return _unlocked_train_epoch(*args)\n"
+        ))
+        command = [
+            sys.executable, "-m", "banking77.train",
+            "--prepared", str(self.workspace / "prepared"),
+            "--output", str(self.workspace / "runs/shared"),
+            "--embedding-size", "8", "--hidden-size", "8", "--max-epochs", "1",
+        ]
+        (self.workspace / "runs/shared").mkdir(parents=True)
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(self.workspace)
+        processes = [
+            subprocess.Popen(command, cwd=self.workspace, env=environment,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for _ in range(2)
+        ]
+        results = [process.communicate(timeout=120) + (process.returncode,)
+                   for process in processes]
+        self.assertEqual(sorted(result[2] for result in results), [0, 1], results)
+        failure = next(result for result in results if result[2] == 1)
+        self.assertIn("choose a new --output", failure[1])
+        run = self.workspace / "runs/shared"
+        self.assertTrue((run / "run.json").is_file())
+        self.assertTrue((run / "best-model.pt").is_file())
 
     def test_setup_and_unfinished_training_failures_are_reported_clearly(self):
         missing = self.train("runs/missing")

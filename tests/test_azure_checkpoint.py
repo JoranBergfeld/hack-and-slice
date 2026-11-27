@@ -134,6 +134,57 @@ class AzureCheckpointTests(unittest.TestCase):
         self.assertEqual((self.workspace / "test.csv").read_text(),
                          "DO NOT READ HELD-OUT DATA")
 
+    def test_collection_reconciles_a_valid_run_left_before_manifest_update(self):
+        self.setup_launch()
+        launched = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        output = self.workspace / "comparison"
+        manifest = json.loads((output / "launch.json").read_text())
+        name = manifest["jobs"][0]["name"]
+        self.service_complete(name)
+        existing_run = output / "runs" / "0"
+        existing_run.parent.mkdir()
+        shutil.copytree(self.workspace / "service" / name / "results", existing_run)
+
+        collected = self.cli("collect", "--launch", "comparison")
+        self.assertEqual(collected.returncode, 0, collected.stderr)
+        self.assertIn("1/2", collected.stdout)
+        manifest = json.loads((output / "launch.json").read_text())
+        self.assertIsNotNone(manifest["results"][0])
+        self.assertTrue((existing_run / "run.json").is_file())
+
+    def test_submission_failure_is_inspected_and_inconclusive_inspection_stops_recovery(self):
+        self.setup_launch()
+        launched = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        output = self.workspace / "comparison"
+        manifest_path = output / "launch.json"
+        manifest = json.loads(manifest_path.read_text())
+        submitted_name = manifest["jobs"][0]["name"]
+        manifest["jobs"][0].update(status="SubmissionFailed", error="client timed out")
+        manifest_path.write_text(json.dumps(manifest))
+
+        ambiguous = self.cli("recover", "--launch", "comparison",
+                             "--job", submitted_name, "--restart")
+        self.assertEqual(ambiguous.returncode, 1, ambiguous.stdout)
+        self.assertIn("is Queued", ambiguous.stderr)
+        self.assertNotIn("recoveries", json.loads(manifest_path.read_text()))
+
+        (self.workspace / "service" / submitted_name / "info.json").write_text("{")
+        inconclusive = self.cli("recover", "--launch", "comparison",
+                                "--job", submitted_name, "--restart")
+        self.assertEqual(inconclusive.returncode, 1, inconclusive.stdout)
+        self.assertIn("Expecting property name", inconclusive.stderr)
+        self.assertNotIn("recoveries", json.loads(manifest_path.read_text()))
+
+    def service_complete(self, name):
+        result = subprocess.run(
+            [sys.executable, "-c", "from fake_azure_service import FakeAzure\n"
+             f"FakeAzure('service').complete({name!r})"],
+            cwd=self.workspace, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_partial_collection_reports_progress_and_blocks_selection_until_local_completion(self):
         self.setup_launch()
         launched = self.launch("--azure-device", "cpu", "--instance-type", "Standard_D2s_v3")
@@ -195,6 +246,10 @@ class AzureCheckpointTests(unittest.TestCase):
         self.assertEqual(report["message_count"], 2)
         self.assertEqual(report["device"], "cpu")
         selection = json.loads((output / "selection.json").read_text())
+        (self.workspace / "banking77/data.py").write_text(
+            "raise RuntimeError('live encoder must not run')\n")
+        (self.workspace / "banking77/model.py").write_text(
+            "raise RuntimeError('live classifier must not run')\n")
         predicted = run_cli("banking77.predict", "--model", output / selection["run"],
                             "--message", "my separate refund demonstration",
                             cwd=self.workspace)

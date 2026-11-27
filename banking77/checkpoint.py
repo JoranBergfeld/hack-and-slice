@@ -84,6 +84,9 @@ def load_classifier(
         raise ValueError(f"{directory}: checkpoint does not match its vocabulary or labels")
     model = IntentClassifier(**settings).to(device)
     model.load_state_dict(checkpoint["state_dict"])
+    if any(not torch.isfinite(parameter).all().item()
+           for parameter in model.state_dict().values()):
+        raise ValueError(f"{directory / BEST_MODEL}: non-finite checkpoint parameters")
     model.eval()
     return SavedClassifier(
         model, vocabulary, label_mapping,

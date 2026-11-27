@@ -151,6 +151,7 @@ def launch(configurations: Path, prepared: Path, output: Path, *, examples: int)
     source, data = output / "source", output / "prepared"
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(source)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     for index, configuration in enumerate(settings):
         print(f"Configuration {index + 1}/{len(settings)}: {configuration}", flush=True)
         run = output / "runs" / str(index)
@@ -226,14 +227,34 @@ def validate_manifest_results(output: Path, manifest: dict, *, allow_partial: bo
     source = manifest["source"]
     if not source["sha256"] or source["identity"] != _identity(source["sha256"]):
         raise ValueError("mismatched captured-code identity")
+    if (output / "source").is_symlink() or (output / "prepared").is_symlink():
+        raise ValueError("captured source and prepared data must not be symbolic links")
+    source_root = (output / "source").resolve()
+    source_paths = list(source_root.rglob("*"))
+    if any(path.is_symlink() for path in source_paths):
+        raise ValueError("captured source must not contain symbolic links")
+    actual_source_files = {
+        path.relative_to(source_root).as_posix() for path in source_paths if path.is_file()
+    }
+    if actual_source_files != set(source["sha256"]):
+        raise ValueError("captured source file list does not match its identity")
     for name, digest in source["sha256"].items():
-        path = (output / "source" / name).resolve()
-        if not path.is_relative_to((output / "source").resolve()) or file_sha256(path) != digest:
+        path = (source_root / name).resolve()
+        if not path.is_relative_to(source_root) or file_sha256(path) != digest:
             raise ValueError(f"mismatched captured source: {name}")
     if set(manifest["prepared"]["sha256"]) != set(PREPARED_FILES):
         raise ValueError("incomplete prepared-data identity")
+    prepared_root = (output / "prepared").resolve()
+    prepared_paths = list(prepared_root.rglob("*"))
+    if any(path.is_symlink() for path in prepared_paths):
+        raise ValueError("prepared data must not contain symbolic links")
+    actual_prepared_files = {
+        path.relative_to(prepared_root).as_posix() for path in prepared_paths if path.is_file()
+    }
+    if actual_prepared_files != set(manifest["prepared"]["sha256"]):
+        raise ValueError("prepared-data file list does not match its identity")
     for name, digest in manifest["prepared"]["sha256"].items():
-        if file_sha256(output / "prepared" / name) != digest:
+        if file_sha256(prepared_root / name) != digest:
             raise ValueError(f"mismatched prepared data: {name}")
     records = []
     for index, configuration in enumerate(configurations):

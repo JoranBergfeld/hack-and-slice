@@ -205,6 +205,52 @@ class RecoveryCheckpointTests(unittest.TestCase):
         self.assertFalse(any(path.name.endswith("-r1")
                              for path in (self.workspace / "service").iterdir()))
 
+    def test_resume_reuses_a_verified_recovery_bundle_after_manifest_update_interruption(self):
+        _, (interrupted, _) = self.setup_recovery_launch()
+        self.service(f"service.interrupt({interrupted!r}, after_epochs=3)")
+        self.assertEqual(self.cli("collect", "--launch", "comparison").returncode, 1)
+        control = self.workspace / "service/control.json"
+        control.write_text('{"fail_submit": [0]}')
+
+        first = self.cli("recover", "--launch", "comparison",
+                         "--job", interrupted, "--resume")
+        self.assertEqual(first.returncode, 1)
+        bundle = self.output / "recoveries/0-r1"
+        self.assertTrue((bundle / "banking77/model.py").is_file())
+        self.assertFalse((bundle / "submission").exists())
+
+        manifest_path = self.output / "launch.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["jobs"][0] = {"name": interrupted, "status": "Failed",
+                               "error": "synthetic node preemption"}
+        manifest.pop("recoveries")
+        manifest_path.write_text(json.dumps(manifest))
+        control.unlink()
+
+        retried = self.cli("recover", "--launch", "comparison",
+                           "--job", interrupted, "--resume")
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        stored = json.loads(manifest_path.read_text())
+        self.assertEqual(len(stored["recoveries"]), 1)
+        self.assertEqual(stored["recoveries"][0]["job_name"], stored["jobs"][0]["name"])
+
+    def test_snapshot_with_changed_optimizer_options_is_rejected_before_submission(self):
+        _, (interrupted, _) = self.setup_recovery_launch()
+        self.service(f"service.interrupt({interrupted!r}, after_epochs=3)")
+        self.assertEqual(self.cli("collect", "--launch", "comparison").returncode, 1)
+        remote = self.workspace / "service" / interrupted / "results/latest-snapshot.pt"
+        snapshot = torch.load(remote, map_location="cpu", weights_only=True)
+        snapshot["optimizer_state"]["param_groups"][0]["lr"] *= 2
+        torch.save(snapshot, remote)
+
+        rejected = self.cli("recover", "--launch", "comparison",
+                            "--job", interrupted, "--resume")
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("optimizer options do not match", rejected.stderr)
+        manifest = json.loads((self.output / "launch.json").read_text())
+        self.assertEqual(manifest["jobs"][0]["name"], interrupted)
+        self.assertNotIn("recoveries", manifest)
+
     def test_failed_recovery_without_remote_progress_falls_back_to_retained_snapshot(self):
         _, (interrupted, _) = self.setup_recovery_launch()
         self.service(f"service.interrupt({interrupted!r}, after_epochs=3)")

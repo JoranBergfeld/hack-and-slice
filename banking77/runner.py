@@ -11,7 +11,7 @@ from typing import Callable
 import sklearn
 import torch
 
-from banking77.artifacts import file_sha256, write_json
+from banking77.artifacts import file_lock, file_sha256, write_json
 
 SEED = 42
 RUN_RECORD = "run.json"
@@ -186,6 +186,10 @@ def load_snapshot(
     best_model = _restore_snapshot_model(
         model_factory, model_settings, best.get("state_dict"), "best model state")
     optimizer = optimizer_factory(model, configuration.learning_rate)
+    expected_options = [
+        {key: value for key, value in group.items() if key != "params"}
+        for group in optimizer.param_groups
+    ]
     try:
         optimizer.load_state_dict(snapshot["optimizer_state"])
     except (AttributeError, IndexError, KeyError, RuntimeError, TypeError, ValueError) as error:
@@ -199,6 +203,12 @@ def load_snapshot(
     if (not optimizer.state or len(optimizer.state) != expected_parameters
             or len(optimizer.param_groups) != 1 or len(group_parameters) != expected_parameters):
         raise ValueError(f"{path}: optimizer state is incomplete")
+    actual_options = [
+        {key: value for key, value in group.items() if key != "params"}
+        for group in optimizer.param_groups
+    ]
+    if actual_options != expected_options:
+        raise ValueError(f"{path}: optimizer options do not match the current configuration")
     if not _finite_tree(optimizer.state_dict()):
         raise ValueError(f"{path}: optimizer state contains non-finite values")
     for parameter, state in optimizer.state.items():
@@ -235,6 +245,27 @@ def load_snapshot(
 
 
 def run_training(
+    configuration: TrainingConfiguration,
+    prepared: Path,
+    output: Path,
+    *,
+    device: torch.device = torch.device("cpu"),
+    examples: int = 5,
+    log: Callable[[str], None] = print,
+    target: str = "local CPU",
+    resume: Path | None = None,
+    identity: dict | None = None,
+) -> dict:
+    """Train one configuration while reserving its output directory."""
+    output.mkdir(parents=True, exist_ok=True)
+    with file_lock(output / ".run.lock"):
+        return _run_training_locked(
+            configuration, prepared, output, device=device, examples=examples,
+            log=log, target=target, resume=resume, identity=identity,
+        )
+
+
+def _run_training_locked(
     configuration: TrainingConfiguration,
     prepared: Path,
     output: Path,

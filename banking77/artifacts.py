@@ -30,9 +30,8 @@ def file_sha256(path: Path) -> str:
 
 
 @contextmanager
-def launch_lock(output: Path):
-    """Serialize readers and writers that update one Azure launch manifest."""
-    lock_path = output / ".launch.lock"
+def file_lock(lock_path: Path):
+    """Serialize operations that update artifacts in a shared directory."""
     with lock_path.open("a+b") as handle:
         handle.seek(0, os.SEEK_END)
         if handle.tell() == 0:
@@ -62,3 +61,10 @@ def launch_lock(output: Path):
             yield
         finally:
             unlock()
+
+
+@contextmanager
+def launch_lock(output: Path):
+    """Serialize readers and writers that update one Azure launch manifest."""
+    with file_lock(output / ".launch.lock"):
+        yield

@@ -130,6 +130,8 @@ Two different files are saved, for different purposes:
   nothing happened: model and optimizer state, the completed epoch and history,
   the best epoch and its weights, early-stopping progress, the random-number
   state (data order, dropout), the configuration and the prepared-data identity.
+  Before resume, the runner checks the model tensors, optimizer state and
+  optimizer options against the captured training configuration.
   It is never used to choose or evaluate a model.
 
 Keep both: after a later interruption, the latest snapshot may be at epoch 3
@@ -323,8 +325,9 @@ python -m banking77.compare status --launch runs/azure-comparison-1
 python -m banking77.compare recover --launch runs/azure-comparison-1 --job FAILED_JOB_NAME --resume
 ```
 
-`--resume` downloads the failed job's outputs, checks that its
-`latest-snapshot.pt` belongs to this launch, configuration and prepared data,
+`--resume` checks Azure before retrying a submission with an unknown outcome,
+then downloads the failed job's outputs and checks that `latest-snapshot.pt`
+belongs to this launch, configuration and prepared data,
 prints the last completed epoch and the best validation result so far, and
 submits a new job named `...-<index>-r1` (then `-r2`, ...). That job runs the
 **same captured code and data** as the original launch, not your current
