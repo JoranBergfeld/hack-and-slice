@@ -37,6 +37,14 @@ class AzureCheckpointTests(unittest.TestCase):
              *arguments], cwd=self.workspace, capture_output=True, text=True,
         )
 
+    def real_cli(self, *arguments):
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(self.workspace)
+        return subprocess.run(
+            [sys.executable, "-m", "banking77.compare", *arguments],
+            cwd=self.workspace, env=environment, capture_output=True, text=True,
+        )
+
     def launch(self, *options):
         return self.cli(
             "launch", "--target", "azure", "--configurations", "configurations.json",
@@ -125,6 +133,10 @@ class AzureCheckpointTests(unittest.TestCase):
         manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
         self.assertEqual(manifest["target"], "azure")
         self.assertEqual(manifest["status"], "setup_failed")
+        status = self.real_cli("status", "--launch", "comparison")
+        self.assertEqual(status.returncode, 1)
+        self.assertIn(manifest["error"], status.stderr)
+        self.assertNotIn("training_environment", status.stderr)
 
     def test_explicit_cpu_submits_independent_jobs_without_training_and_captures_edits(self):
         self.setup_launch()

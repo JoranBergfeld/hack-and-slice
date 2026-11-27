@@ -225,7 +225,9 @@ def _inspect_azure_locked(
     if manifest.get("target") != "azure":
         raise ValueError("status/collect requires an Azure launch")
     validate_results(output, allow_partial=True)
-    service = service or MLService(manifest["azure"], manifest["training_environment"])
+    if manifest["jobs"]:
+        service = service or MLService(
+            manifest["azure"], manifest["training_environment"])
     print(f"Target: Azure ML {manifest['azure']['device'].upper()}, "
           f"{manifest['azure']['instance_type']}, Standard tier", flush=True)
     failures = [manifest["error"]] if manifest["status"] == "setup_failed" else []

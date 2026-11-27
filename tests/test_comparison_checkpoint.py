@@ -1,12 +1,16 @@
 import hashlib
+import importlib
 import json
 import shutil
 import subprocess
+import sys
 import unittest
 import xml.etree.ElementTree as ET
 
 import torch
 
+import banking77
+from banking77.captured import captured_modules
 from test_data_checkpoint import run_cli
 import test_training_checkpoint as training_tests
 
@@ -15,6 +19,18 @@ class ComparisonCheckpointTests(unittest.TestCase):
     setUp = training_tests.TrainingCheckpointTests.setUp
     install_documented_solution = training_tests.TrainingCheckpointTests.install_documented_solution
     prepare_synthetic_data = training_tests.TrainingCheckpointTests.prepare_synthetic_data
+
+    def test_captured_module_context_restores_package_attributes(self):
+        self.install_documented_solution()
+        live_data = importlib.import_module("banking77.data")
+
+        with captured_modules(self.workspace, ("data",)) as captured:
+            self.assertIsNot(captured["data"], live_data)
+            self.assertIs(banking77.data, captured["data"])
+
+        self.assertIs(sys.modules["banking77.data"], live_data)
+        self.assertIs(banking77.data, live_data)
+        self.assertIs(importlib.import_module("banking77.data"), live_data)
 
     def launch(self, output="comparison"):
         configurations = [
