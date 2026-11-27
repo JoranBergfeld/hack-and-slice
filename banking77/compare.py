@@ -19,8 +19,8 @@ import torch
 from banking77.runner import PREPARED_FILES, SEED, TrainingConfiguration
 from banking77.artifacts import file_sha256, write_json
 from banking77.azure_settings import job_name, torch_build, torch_device
+from banking77.captured import captured_modules
 from banking77.cli import cli_errors
-from banking77.model import IntentClassifier
 
 
 RESULT_FILES = ("run.json", "best-model.pt", "vocabulary.json", "labels.json")
@@ -76,17 +76,31 @@ def write_chart(output: Path, records: list[dict]) -> None:
     (output / "comparison.svg").write_text("\n".join(parts), encoding="utf-8")
 
 
-def capture(configurations: Path, prepared: Path, output: Path, *, examples: int) -> dict:
-    """Capture current participant code and prepared data without running training."""
+def validate_capture_inputs(
+    configurations: Path, prepared: Path, examples: int
+) -> list[dict]:
     settings = _configurations(configurations)
     if examples < 0:
         raise ValueError("examples must not be negative")
-    prepared, output = prepared.resolve(), output.resolve()
+    prepared = prepared.resolve()
     for name in PREPARED_FILES:
         if not (prepared / name).is_file():
             raise FileNotFoundError(f"{prepared / name} is missing; prepare data first")
+    return settings
+
+
+def capture(
+    configurations: Path, prepared: Path, output: Path, *, examples: int,
+    create_output: bool = True,
+) -> dict:
+    """Capture current participant code and prepared data without running training."""
+    settings = validate_capture_inputs(configurations, prepared, examples)
+    prepared, output = prepared.resolve(), output.resolve()
     # Never reuse a directory, including an interrupted launch's partial outputs.
-    output.mkdir(parents=True, exist_ok=False)
+    if create_output:
+        output.mkdir(parents=True, exist_ok=False)
+    elif not output.is_dir():
+        raise FileNotFoundError(f"{output} must exist before capturing into it")
     project = Path(__file__).resolve().parents[1]
     source = output / "source"
     (source / "banking77").mkdir(parents=True)
@@ -306,16 +320,17 @@ def validate_manifest_results(output: Path, manifest: dict, *, allow_partial: bo
                 or checkpoint["validation_accuracy"] != record["best_validation_accuracy"]
                 or not checkpoint["state_dict"]):
             raise ValueError(f"mismatched checkpoint for configuration {index + 1}")
-        model = IntentClassifier(**model_settings)
-        try:
-            model.load_state_dict(checkpoint["state_dict"], strict=True)
-        except (RuntimeError, TypeError) as error:
-            raise ValueError(
-                f"invalid model parameters for configuration {index + 1}: {error}"
-            ) from error
-        if any(not torch.isfinite(parameter).all().item()
-               for parameter in model.state_dict().values()):
-            raise ValueError(f"non-finite model parameters for configuration {index + 1}")
+        with captured_modules(output / "source", ("data", "model")) as captured:
+            model = captured["model"].IntentClassifier(**model_settings)
+            try:
+                model.load_state_dict(checkpoint["state_dict"], strict=True)
+            except (RuntimeError, TypeError) as error:
+                raise ValueError(
+                    f"invalid model parameters for configuration {index + 1}: {error}"
+                ) from error
+            if any(not torch.isfinite(parameter).all().item()
+                   for parameter in model.state_dict().values()):
+                raise ValueError(f"non-finite model parameters for configuration {index + 1}")
         records.append(record)
     return records
 

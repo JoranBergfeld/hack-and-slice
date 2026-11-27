@@ -9,10 +9,12 @@ import tempfile
 from typing import Protocol
 
 from banking77.compare import (
-    RESULT_FILES, capture, validate_manifest_results, validate_results, write_chart,
+    RESULT_FILES, capture, validate_capture_inputs, validate_manifest_results,
+    validate_results, write_chart,
 )
-from banking77.artifacts import file_sha256, write_json
+from banking77.artifacts import file_sha256, launch_lock, write_json
 from banking77.azure_settings import job_name, torch_build, torch_device
+from banking77.captured import captured_modules
 
 RECOVERABLE = ("Failed", "Canceled", "SubmissionFailed")
 
@@ -51,6 +53,8 @@ def _training_environment(output: Path, software: dict, azure_device: str) -> di
                 raise ValueError("Azure requirements must be package specifiers, not local files/options")
             if not re.match(r"^(torch|scikit-learn)\s*(==|>=|<=|~=|!=|>|<|$)", line):
                 extra_packages.append(line)
+            elif re.match(r"^torch\s*==", line):
+                torch_version = re.sub(r"^torch\s*==\s*", "", line)
     return {
         "image": "mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest",
         "conda": {"name": "banking77", "channels": ["conda-forge"],
@@ -67,9 +71,18 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
     for option in ("azure_device", "instance_type", "subscription", "resource_group", "workspace"):
         if not getattr(arguments, option):
             raise ValueError(f"--{option.replace('_', '-')} is required for Azure; no fallback")
-    manifest = capture(arguments.configurations, arguments.prepared,
-                       arguments.output, examples=arguments.examples)
     output = arguments.output.resolve()
+    validate_capture_inputs(arguments.configurations, arguments.prepared, arguments.examples)
+    output.mkdir(parents=True, exist_ok=False)
+    with launch_lock(output):
+        manifest = capture(
+            arguments.configurations, arguments.prepared, output,
+            examples=arguments.examples, create_output=False,
+        )
+        _submit_captured_launch(arguments, service, output, manifest)
+
+
+def _submit_captured_launch(arguments, service, output: Path, manifest: dict) -> None:
     manifest.update(
         target="azure", device=torch_device(arguments.azure_device),
         status="submitting", results=[None] * len(manifest["configurations"]), jobs=[],
@@ -77,6 +90,12 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
                "workspace": arguments.workspace, "device": arguments.azure_device,
                "instance_type": arguments.instance_type, "tier": "Standard"},
     )
+    requirements = output / "source" / "requirements.txt"
+    if requirements.is_file():
+        pinned_torch = re.search(
+            r"(?m)^\s*torch\s*==\s*([^\s#]+)", requirements.read_text(encoding="utf-8"))
+        if pinned_torch:
+            manifest["software"]["torch"] = pinned_torch.group(1)
     # Capture the exact environment definition alongside the submitted code.
     manifest["training_environment"] = _training_environment(
         output, manifest["software"], arguments.azure_device)
@@ -117,6 +136,13 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
 
 def inspect_azure(output: Path, *, collect: bool, service: AzureService | None = None) -> None:
     output = output.resolve()
+    with launch_lock(output):
+        _inspect_azure_locked(output, collect=collect, service=service)
+
+
+def _inspect_azure_locked(
+    output: Path, *, collect: bool, service: AzureService | None = None
+) -> None:
     manifest = json.loads((output / "launch.json").read_text(encoding="utf-8"))
     if manifest.get("target") != "azure":
         raise ValueError("status/collect requires an Azure launch")
@@ -182,11 +208,41 @@ def inspect_azure(output: Path, *, collect: bool, service: AzureService | None =
         raise RuntimeError("; ".join(failures))
 
 
+def _validate_recovery_snapshot(
+    snapshot: Path, output: Path, manifest: dict, index: int,
+    load_snapshot, configuration_type,
+) -> dict:
+    configuration = configuration_type(**manifest["configurations"][index])
+    vocabulary = json.loads((output / "prepared" / "vocabulary.json").read_text(
+        encoding="utf-8"))
+    labels = json.loads((output / "prepared" / "labels.json").read_text(encoding="utf-8"))
+    settings = configuration.model_settings(len(vocabulary), len(labels))
+    with captured_modules(output / "source", ("data", "model", "training")) as captured:
+        return load_snapshot(
+            snapshot,
+            configuration=configuration,
+            model_settings=settings,
+            identity={"launch_id": manifest["launch_id"], "configuration_index": index},
+            prepared_sha256=manifest["prepared"]["sha256"],
+            model_factory=lambda model_settings: captured["model"].IntentClassifier(
+                **model_settings),
+            optimizer_factory=lambda model, learning_rate: captured["training"].create_optimizer(
+                model, learning_rate),
+        )
+
+
 def recover_azure(arguments, *, service: AzureService | None = None) -> None:
+    output = arguments.launch.resolve()
+    with launch_lock(output):
+        _recover_azure_locked(arguments, output, service=service)
+
+
+def _recover_azure_locked(
+    arguments, output: Path, *, service: AzureService | None = None
+) -> None:
     """Recover one failed job or completed job whose collected output was rejected."""
     from banking77.compare import expected_attempt
-    from banking77.runner import LATEST_SNAPSHOT, load_snapshot
-    output = arguments.launch.resolve()
+    from banking77.runner import LATEST_SNAPSHOT, TrainingConfiguration, load_snapshot
     manifest = json.loads((output / "launch.json").read_text(encoding="utf-8"))
     if manifest.get("target") != "azure":
         raise ValueError("recover requires an Azure launch")
@@ -239,32 +295,50 @@ def recover_azure(arguments, *, service: AzureService | None = None) -> None:
             "snapshot_sha256": None,
         }
         if arguments.resume:
+            prior_recovery = previous["recovery"]
+            retained_snapshot = None
+            retained_error = None
+            if prior_recovery and prior_recovery.get("snapshot_sha256"):
+                retained_snapshot = (
+                    output / "recoveries" / f"{index}-r{prior_recovery['attempt']}"
+                    / LATEST_SNAPSHOT
+                )
             try:
-                if job["status"] == "SubmissionFailed":
-                    prior_recovery = previous["recovery"]
-                    if not prior_recovery or not prior_recovery["snapshot_sha256"]:
-                        raise ValueError("no retained snapshot from the failed submission")
-                    snapshot = (output / "recoveries"
-                                / f"{index}-r{prior_recovery['attempt']}"
-                                / LATEST_SNAPSHOT)
-                    if file_sha256(snapshot) != prior_recovery["snapshot_sha256"]:
-                        raise ValueError("retained snapshot hash does not match")
-                else:
+                if job["status"] != "SubmissionFailed":
                     downloaded = service.download(
                         arguments.job, Path(temporary) / "download")
                     snapshot = downloaded / LATEST_SNAPSHOT
-                state = load_snapshot(snapshot)
+                    state = _validate_recovery_snapshot(
+                        snapshot, output, manifest, index, load_snapshot,
+                        TrainingConfiguration)
+                else:
+                    raise ValueError("submission did not produce remote progress")
             except (OSError, RuntimeError, ValueError, KeyError, EOFError,
                     pickle.UnpicklingError) as error:
-                raise ValueError(f"{arguments.job} has no usable latest resumable snapshot "
-                                 f"({error}); use --restart to train it again from epoch 1"
-                                 ) from error
-            if (state["identity"] != {"launch_id": manifest["launch_id"],
-                                      "configuration_index": index}
-                    or state["configuration"] != manifest["configurations"][index]
-                    or state["prepared_sha256"] != manifest["prepared"]["sha256"]):
-                raise ValueError(f"{arguments.job}: latest snapshot belongs to a different "
-                                 "launch, configuration or prepared data")
+                retained_error = error
+                state = None
+            if state is None and retained_snapshot is not None:
+                try:
+                    if file_sha256(retained_snapshot) != prior_recovery["snapshot_sha256"]:
+                        raise ValueError("retained snapshot hash does not match")
+                    snapshot = retained_snapshot
+                    state = _validate_recovery_snapshot(
+                        snapshot, output, manifest, index, load_snapshot,
+                        TrainingConfiguration)
+                    print(f"Using retained snapshot because {arguments.job} has no "
+                          f"usable remote progress ({retained_error}).", flush=True)
+                except (OSError, RuntimeError, ValueError, KeyError, EOFError,
+                        pickle.UnpicklingError) as error:
+                    raise ValueError(
+                        f"{arguments.job} has no usable remote or retained latest "
+                        f"resumable snapshot ({error}); use --restart to train it again "
+                        "from epoch 1"
+                    ) from error
+            if state is None:
+                raise ValueError(
+                    f"{arguments.job} has no usable latest resumable snapshot "
+                    f"({retained_error}); use --restart to train it again from epoch 1"
+                ) from retained_error
             best = state["best"]
             entry.update(resumed_after_epoch=state["completed_epoch"],
                          from_device=state["device"], snapshot_sha256=file_sha256(snapshot))

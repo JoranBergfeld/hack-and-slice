@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 
 from test_data_checkpoint import ROOT, run_cli
@@ -42,6 +43,45 @@ class AzureCheckpointTests(unittest.TestCase):
             "--subscription", "test-subscription", "--resource-group", "test-group",
             "--workspace", "test-workspace", *options,
         )
+
+    def test_launch_lock_serializes_processes_until_manifest_transaction_finishes(self):
+        output = self.workspace / "locked-launch"
+        output.mkdir()
+        holder_script = (
+            "from pathlib import Path\n"
+            "import sys, time\n"
+            "from banking77.artifacts import launch_lock\n"
+            "output = Path(sys.argv[1])\n"
+            "with launch_lock(output):\n"
+            " print('locked', flush=True)\n"
+            " while not (output / 'release').exists(): time.sleep(0.01)\n"
+        )
+        waiter_script = (
+            "from pathlib import Path\n"
+            "import sys\n"
+            "from banking77.artifacts import launch_lock\n"
+            "with launch_lock(Path(sys.argv[1])): print('acquired', flush=True)\n"
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-c", holder_script, str(output)], cwd=self.workspace,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        waiter = None
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "locked")
+            waiter = subprocess.Popen(
+                [sys.executable, "-c", waiter_script, str(output)], cwd=self.workspace,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            time.sleep(0.2)
+            self.assertIsNone(waiter.poll(), "second process passed the launch lock")
+        finally:
+            (output / "release").touch()
+        holder.communicate(timeout=10)
+        stdout, stderr = waiter.communicate(timeout=10)
+        self.assertEqual(holder.returncode, 0)
+        self.assertEqual(waiter.returncode, 0, stderr)
+        self.assertEqual(stdout.strip(), "acquired")
 
     def test_shipped_editable_configurations_launch_the_suggested_starting_comparison(self):
         self.setup_launch()
@@ -197,7 +237,7 @@ class AzureCheckpointTests(unittest.TestCase):
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
         self.assertEqual(manifest["device"], "cuda")
-        self.assertIn("torch==2.5.1+cu124",
+        self.assertIn("torch==2.10.0+cu126",
                       manifest["training_environment"]["conda"]["dependencies"][-1]["pip"])
         name = manifest["jobs"][0]["name"]
         # This deliberately runs the captured GPU worker on a CPU-only test host.

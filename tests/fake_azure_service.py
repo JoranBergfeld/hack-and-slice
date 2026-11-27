@@ -72,6 +72,7 @@ class FakeAzure:
             state["device"] = "cuda"
             for entry in state["history"]:
                 entry["device"] = "cuda"
+            state["random_state"]["torch_cuda"] = [torch.zeros(1, dtype=torch.uint8)]
             torch.save(state, snapshot)
         info.update(status="Failed",
                     error=f"synthetic node preemption during epoch {after_epochs + 1}")

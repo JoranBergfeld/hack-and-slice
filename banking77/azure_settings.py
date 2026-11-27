@@ -11,4 +11,4 @@ def torch_device(azure_device: str) -> str:
 
 
 def torch_build(device: str) -> str:
-    return {"cpu": "cpu", "cuda": "cu124"}[device]
+    return {"cpu": "cpu", "cuda": "cu126"}[device]

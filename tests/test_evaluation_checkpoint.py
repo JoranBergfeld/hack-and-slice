@@ -110,11 +110,29 @@ class EvaluationCheckpointTests(unittest.TestCase):
             "text,category\nCASH,cash\n???,cash\nnew word,cash\n"
             "refund,Refund_not_showing_up\npending,Refund_not_showing_up\n"
         )
-        # Changing training code must not cause evaluation to train again.
-        module = self.workspace / "banking77/training.py"
-        module.write_text(module.read_text() + (
-            "\ndef train_epoch(*args):\n    raise RuntimeError('must not retrain')\n"
+        # Evaluation uses the captured model, preprocessing, loader and checkpoint code.
+        data_module = self.workspace / "banking77/data.py"
+        data_module.write_text(data_module.read_text() + (
+            "\ndef read_messages(*args, **kwargs):\n"
+            "    raise RuntimeError('live preprocessing must not run')\n"
+            "\ndef encode_message(*args, **kwargs):\n"
+            "    raise RuntimeError('live encoding must not run')\n"
+            "\ndef load_test(*args, **kwargs):\n"
+            "    raise RuntimeError('live test loader must not run')\n"
         ))
+        training_module = self.workspace / "banking77/training.py"
+        training_module.write_text(training_module.read_text() + (
+            "\ndef build_loader(*args, **kwargs):\n"
+            "    raise RuntimeError('live loader must not run')\n"
+        ))
+        model_module = self.workspace / "banking77/model.py"
+        model_module.write_text(model_module.read_text() + (
+            "\nclass IntentClassifier:\n"
+            "    def __init__(self, **kwargs):\n"
+            "        raise RuntimeError('live classifier code must not run')\n"
+        ))
+        (self.workspace / "banking77/checkpoint.py").write_text(
+            "raise RuntimeError('live checkpoint code must not run')\n")
         result = run_cli("banking77.evaluate", "--launch", "comparison",
                          "--test-csv", "heldout.csv", cwd=self.workspace)
         self.assertEqual(result.returncode, 0, result.stderr)

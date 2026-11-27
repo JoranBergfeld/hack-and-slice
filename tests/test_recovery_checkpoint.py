@@ -185,6 +185,48 @@ class RecoveryCheckpointTests(unittest.TestCase):
             (self.output / "runs/0/run.json").read_text()
         )["recovery"]["mode"], "resume")
 
+    def test_unusable_remote_snapshot_is_rejected_before_submitting_paid_job(self):
+        _, (interrupted, _) = self.setup_recovery_launch()
+        self.service(f"service.interrupt({interrupted!r}, after_epochs=3)")
+        self.assertEqual(self.cli("collect", "--launch", "comparison").returncode, 1)
+        remote = self.workspace / "service" / interrupted / "results/latest-snapshot.pt"
+        import torch
+        snapshot = torch.load(remote, map_location="cpu", weights_only=True)
+        snapshot["model_state"].pop(next(iter(snapshot["model_state"])))
+        torch.save(snapshot, remote)
+
+        rejected = self.cli("recover", "--launch", "comparison",
+                            "--job", interrupted, "--resume")
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("latest model state does not match", rejected.stderr)
+        manifest = json.loads((self.output / "launch.json").read_text())
+        self.assertEqual(manifest["jobs"][0]["name"], interrupted)
+        self.assertNotIn("recoveries", manifest)
+        self.assertFalse(any(path.name.endswith("-r1")
+                             for path in (self.workspace / "service").iterdir()))
+
+    def test_failed_recovery_without_remote_progress_falls_back_to_retained_snapshot(self):
+        _, (interrupted, _) = self.setup_recovery_launch()
+        self.service(f"service.interrupt({interrupted!r}, after_epochs=3)")
+        self.assertEqual(self.cli("collect", "--launch", "comparison").returncode, 1)
+        first = self.cli("recover", "--launch", "comparison",
+                         "--job", interrupted, "--resume")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_retry = json.loads(
+            (self.output / "launch.json").read_text()
+        )["jobs"][0]["name"]
+        self.service(f"service.fail({first_retry!r}, 'failed before worker startup')")
+
+        retried = self.cli("recover", "--launch", "comparison",
+                           "--job", first_retry, "--resume")
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertIn("Using retained snapshot", retried.stdout)
+        manifest = json.loads((self.output / "launch.json").read_text())
+        self.assertEqual(manifest["recoveries"][1]["resumed_after_epoch"], 3)
+        self.assertEqual(manifest["recoveries"][1]["failed_job"], first_retry)
+        self.assertEqual(manifest["recoveries"][1]["snapshot_sha256"],
+                         manifest["recoveries"][0]["snapshot_sha256"])
+
     def test_gpu_job_resumes_on_cpu_only_when_explicitly_chosen(self):
         manifest, (interrupted, untouched) = self.setup_recovery_launch(
             "--azure-device", "gpu", "--instance-type", "Standard_NC4as_T4_v3")

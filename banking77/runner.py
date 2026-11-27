@@ -87,12 +87,150 @@ def _save_durably(contents: dict, path: Path) -> None:
     temporary.replace(path)
 
 
-def load_snapshot(path: Path | str) -> dict:
-    """Read a latest resumable snapshot written by run_training."""
+def _finite_tree(value) -> bool:
+    if isinstance(value, torch.Tensor):
+        return bool(torch.isfinite(value).all().item())
+    if isinstance(value, dict):
+        return all(_finite_tree(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return all(_finite_tree(item) for item in value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return True
+
+
+def _restore_snapshot_model(model_factory, settings: dict, state: dict, label: str):
+    model = model_factory(settings)
+    try:
+        model.load_state_dict(state, strict=True)
+    except (RuntimeError, TypeError) as error:
+        raise ValueError(f"{label} does not match the captured classifier: {error}") from error
+    if not _finite_tree(model.state_dict()):
+        raise ValueError(f"{label} contains non-finite parameters")
+    return model
+
+
+def load_snapshot(
+    path: Path | str,
+    *,
+    configuration: TrainingConfiguration,
+    model_settings: dict,
+    identity: dict,
+    prepared_sha256: dict,
+    model_factory,
+    optimizer_factory,
+) -> dict:
+    """Validate a resumable snapshot before restoring or submitting it."""
     snapshot = torch.load(path, map_location="cpu", weights_only=True)
     if (not isinstance(snapshot, dict) or snapshot.get("kind") != "latest-resumable-snapshot"
-            or snapshot.get("schema_version") != SNAPSHOT_VERSION):
+            or type(snapshot.get("schema_version")) is not int
+            or snapshot["schema_version"] != SNAPSHOT_VERSION):
         raise ValueError(f"{path}: not a supported latest resumable snapshot")
+    required = {
+        "identity", "configuration", "model_settings", "seed", "prepared_sha256",
+        "device", "completed_epoch", "history", "best", "early_stopping",
+        "model_state", "optimizer_state", "random_state",
+    }
+    if not required.issubset(snapshot):
+        raise ValueError(f"{path}: incomplete resumable snapshot payload")
+    if (snapshot["identity"] != identity
+            or snapshot["configuration"] != asdict(configuration)
+            or snapshot["model_settings"] != model_settings
+            or snapshot["seed"] != SEED
+            or snapshot["prepared_sha256"] != prepared_sha256):
+        raise ValueError(f"{path}: snapshot belongs to a different run, configuration "
+                         "or prepared data")
+    epoch = snapshot["completed_epoch"]
+    history = snapshot["history"]
+    if (type(epoch) is not int or not 1 <= epoch <= configuration.max_epochs
+            or not isinstance(history, list) or len(history) != epoch):
+        raise ValueError(f"{path}: snapshot epoch and history are inconsistent")
+    accuracies = []
+    for number, entry in enumerate(history, start=1):
+        if (not isinstance(entry, dict) or type(entry.get("epoch")) is not int
+                or entry["epoch"] != number
+                or type(entry.get("training_loss")) not in (int, float)
+                or (type(entry["training_loss"]) is float
+                    and not math.isfinite(entry["training_loss"]))
+                or entry["training_loss"] < 0
+                or type(entry.get("validation_accuracy")) not in (int, float)
+                or (type(entry["validation_accuracy"]) is float
+                    and not math.isfinite(entry["validation_accuracy"]))
+                or not 0 <= entry["validation_accuracy"] <= 1
+                or entry.get("device") not in ("cpu", "cuda")):
+            raise ValueError(f"{path}: invalid history at epoch {number}")
+        accuracies.append(entry["validation_accuracy"])
+    best = snapshot["best"]
+    if (not isinstance(best, dict) or type(best.get("epoch")) is not int
+            or best["epoch"] != accuracies.index(max(accuracies)) + 1
+            or type(best.get("validation_accuracy")) not in (int, float)
+            or (type(best["validation_accuracy"]) is float
+                and not math.isfinite(best["validation_accuracy"]))
+            or best.get("validation_accuracy") != max(accuracies)):
+        raise ValueError(f"{path}: best checkpoint does not match validation history")
+    early = snapshot["early_stopping"]
+    expected_stop = epoch - best["epoch"] >= configuration.patience
+    if (not isinstance(early, dict)
+            or type(early.get("patience")) is not int
+            or early["patience"] != configuration.patience
+            or type(early.get("epochs_without_improvement")) is not int
+            or early.get("epochs_without_improvement") != epoch - best["epoch"]
+            or type(early.get("stop")) is not bool or early["stop"] != expected_stop):
+        raise ValueError(f"{path}: early-stopping state does not match history")
+    if (snapshot["device"] not in ("cpu", "cuda")
+            or history[-1]["device"] != snapshot["device"]):
+        raise ValueError(f"{path}: snapshot device does not match latest epoch")
+
+    model = _restore_snapshot_model(
+        model_factory, model_settings, snapshot["model_state"], "latest model state")
+    best_model = _restore_snapshot_model(
+        model_factory, model_settings, best.get("state_dict"), "best model state")
+    optimizer = optimizer_factory(model, configuration.learning_rate)
+    try:
+        optimizer.load_state_dict(snapshot["optimizer_state"])
+    except (AttributeError, IndexError, KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise ValueError(f"{path}: optimizer state is incompatible: {error}") from error
+    expected_parameters = sum(parameter.requires_grad for parameter in model.parameters())
+    try:
+        parameter_group = optimizer.param_groups[0]
+        group_parameters = parameter_group["params"]
+    except (IndexError, KeyError, TypeError) as error:
+        raise ValueError(f"{path}: optimizer parameter groups are invalid") from error
+    if (not optimizer.state or len(optimizer.state) != expected_parameters
+            or len(optimizer.param_groups) != 1 or len(group_parameters) != expected_parameters):
+        raise ValueError(f"{path}: optimizer state is incomplete")
+    if not _finite_tree(optimizer.state_dict()):
+        raise ValueError(f"{path}: optimizer state contains non-finite values")
+    for parameter, state in optimizer.state.items():
+        if (not isinstance(state, dict)
+                or not isinstance(state.get("exp_avg"), torch.Tensor)
+                or not isinstance(state.get("exp_avg_sq"), torch.Tensor)
+                or state["exp_avg"].shape != parameter.shape
+                or state["exp_avg_sq"].shape != parameter.shape
+                or not isinstance(state.get("step"), torch.Tensor)
+                or state["step"].numel() != 1 or not _finite_tree(state["step"])
+                or state["step"].item() < 1):
+            raise ValueError(f"{path}: optimizer tensors do not match model parameters")
+    randomness = snapshot["random_state"]
+    if not isinstance(randomness, dict):
+        raise ValueError(f"{path}: incomplete random state")
+    try:
+        for name in ("torch_cpu", "data_order"):
+            state = randomness[name]
+            if not isinstance(state, torch.Tensor) or state.dtype != torch.uint8:
+                raise ValueError(f"invalid {name} generator state")
+            torch.Generator(device="cpu").set_state(state)
+        random.Random().setstate(randomness["python"])
+    except (KeyError, RuntimeError, TypeError, ValueError) as error:
+        raise ValueError(f"{path}: invalid random state: {error}") from error
+    cuda_state = randomness.get("torch_cuda")
+    if (not isinstance(cuda_state, list)
+            or (snapshot["device"] == "cuda" and
+                (not cuda_state or any(not isinstance(state, torch.Tensor)
+                                       or state.dtype != torch.uint8 or state.ndim != 1
+                                       for state in cuda_state)))
+            or (snapshot["device"] == "cpu" and cuda_state)):
+        raise ValueError(f"{path}: invalid CUDA random state")
     return snapshot
 
 
@@ -155,13 +293,13 @@ def run_training(
     history, accuracies = [], []
     best_epoch, best_state, stop, resumed = 0, None, False, None
     if resume is not None:
-        snapshot = load_snapshot(resume)
-        if (snapshot["configuration"] != asdict(configuration)
-                or snapshot["model_settings"] != model_settings
-                or snapshot["seed"] != SEED or snapshot["prepared_sha256"] != prepared_sha256
-                or snapshot["identity"] != identity):
-            raise ValueError(f"{resume}: snapshot belongs to a different run, "
-                             "configuration or prepared data")
+        snapshot = load_snapshot(
+            resume, configuration=configuration, model_settings=model_settings,
+            identity=identity, prepared_sha256=prepared_sha256,
+            model_factory=lambda settings: IntentClassifier(**settings),
+            optimizer_factory=lambda current_model, learning_rate: create_optimizer(
+                current_model, learning_rate),
+        )
         model.load_state_dict(snapshot["model_state"])
         optimizer.load_state_dict(snapshot["optimizer_state"])
         history = [dict(entry) for entry in snapshot["history"]]

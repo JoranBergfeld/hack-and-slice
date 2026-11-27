@@ -249,15 +249,15 @@ Missing choices, incompatible VM sizes, authentication, quota and submission
 errors are reported. A GPU job without usable CUDA fails rather than training
 on CPU. There is no automatic compute fallback.
 
-Each launch captures a conda environment definition: the current Python,
-PyTorch and scikit-learn versions, with the CPU PyTorch build or the CUDA 12.4
-build for the explicit GPU choice, on an Azure ML Ubuntu base-image reference.
-Additional package specifiers in the captured `requirements.txt` are included.
-Local-file requirements, include files and pip options are rejected rather
-than silently ignored. Install your intended training versions locally before
-launching; the helper pins those installed versions for Azure instead of
-changing them to satisfy a different requirements pin. Unsupported versions or
-unavailable packages fail environment setup. The base-image reference is
+Each launch captures a conda environment definition: the current Python and
+scikit-learn versions, plus the PyTorch version pinned in `requirements.txt`.
+Azure uses the CPU PyTorch build or the CUDA 12.6 build for the explicit GPU
+choice, on an Azure ML Ubuntu base-image reference. Additional package
+specifiers in the captured `requirements.txt` are included. Local-file
+requirements, include files and pip options are rejected rather than silently
+ignored. Install the pinned requirements locally before launching so local
+training and Azure use the same patched PyTorch release. Unsupported versions
+or unavailable packages fail environment setup. The base-image reference is
 recorded, not a promise of a bit-for-bit immutable OS image. Each collected run
 also records actual software, runtime platform/thread information and CUDA
 version; CPU/GPU results need not be bit-for-bit identical.
