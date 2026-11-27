@@ -44,8 +44,9 @@ def _comparison_prediction(
         raise ValueError(f"{model_path} is not the selected run; use the run in "
                          f"{selection_path}")
 
+    canonical_run = launch / "runs" / str(index)
     with captured_modules(launch / "source", ("data", "model", "checkpoint")) as captured:
-        saved = captured["checkpoint"].load_classifier(model_path, device="cpu")
+        saved = captured["checkpoint"].load_classifier(canonical_run, device="cpu")
         module_name = "banking77.prediction"
         previous = sys.modules.pop(module_name, None)
         try:

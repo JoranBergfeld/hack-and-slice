@@ -256,6 +256,16 @@ class AzureCheckpointTests(unittest.TestCase):
         self.assertEqual(predicted.returncode, 0, predicted.stderr)
         self.assertIn("Predicted intent:", predicted.stdout)
         self.assertIn("local CPU", predicted.stdout)
+        canonical_run = output / selection["run"]
+        alias_run = output / "runs" / f"{selection['configuration_index']:02d}"
+        self.assertNotEqual(alias_run.resolve(), canonical_run.resolve())
+        shutil.copytree(canonical_run, alias_run)
+        (alias_run / "best-model.pt").write_bytes(b"unvalidated alias weights")
+        alias_prediction = run_cli(
+            "banking77.predict", "--model", alias_run,
+            "--message", "my separate refund demonstration", cwd=self.workspace)
+        self.assertEqual(alias_prediction.returncode, 0, alias_prediction.stderr)
+        self.assertEqual(alias_prediction.stdout, predicted.stdout)
 
     def test_failed_submission_is_reported_and_does_not_prevent_other_independent_jobs(self):
         self.setup_launch()
