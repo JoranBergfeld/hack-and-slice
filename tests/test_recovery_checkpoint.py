@@ -22,7 +22,9 @@ def train_epoch(model, loader, optimizer, device):
     return loss
 _documented_validation_accuracy = validation_accuracy
 def validation_accuracy(model, loader, device):
-    _documented_validation_accuracy(model, loader, device)
+    measured = _documented_validation_accuracy(model, loader, device)
+    if model.__class__.__name__ == "_Lookup":
+        return measured
     return _scripted_accuracies[_completed_epochs[0] - 1]
 '''
 CONFIGURATION = {"embedding_size": 4, "hidden_size": 4, "batch_size": 8,

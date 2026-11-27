@@ -235,6 +235,10 @@ az account set --subscription YOUR_SUBSCRIPTION_ID
 python -m banking77.check_training
 ```
 
+The launcher also runs the data, model and training checks from the captured
+code before submitting any Azure jobs. If a check fails, no job is submitted or
+charged.
+
 The SDK is not needed for local training or offline fake-service tests.
 For Azure CPU, explicitly supply **both** the device and VM size:
 

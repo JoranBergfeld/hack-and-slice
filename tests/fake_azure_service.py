@@ -1,5 +1,6 @@
 """Offline external Azure boundary; submission copies code but never trains."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -66,8 +67,10 @@ class FakeAzure:
             f"{str(job / 'results')!r}]\n"
             "raise SystemExit(main())\n"
         )
+        environment = os.environ.copy()
+        environment["CUDA_VISIBLE_DEVICES"] = ""
         result = subprocess.run([sys.executable, "-c", script], cwd=code,
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, env=environment)
         if result.returncode != 137:
             raise RuntimeError(f"expected an interrupted worker: {result.stderr}")
         snapshot = job / "results" / "latest-snapshot.pt"
@@ -91,10 +94,12 @@ class FakeAzure:
     def complete(self, name):
         job = self.root / name
         info = self.inspect(name)
+        environment = os.environ.copy()
+        environment["CUDA_VISIBLE_DEVICES"] = ""
         result = subprocess.run(
             [sys.executable, "-m", "banking77.azure_worker", "--index",
              str(info["index"]), "--output", str(job / "results")],
-            cwd=job / "code", capture_output=True, text=True,
+            cwd=job / "code", capture_output=True, text=True, env=environment,
         )
         if result.returncode:
             raise RuntimeError(result.stderr)

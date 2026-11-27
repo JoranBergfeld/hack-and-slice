@@ -5,6 +5,8 @@ from pathlib import Path
 import pickle
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 from typing import Protocol
 
@@ -122,6 +124,20 @@ def _training_environment(output: Path, software: dict, azure_device: str) -> di
     }
 
 
+def _validate_captured_code(source: Path) -> None:
+    for check in ("check_data", "check_model", "check_training"):
+        result = subprocess.run(
+            [sys.executable, "-B", "-m", f"banking77.{check}"],
+            cwd=source, capture_output=True, text=True,
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip()
+            raise ValueError(
+                f"Azure launch preflight {check} failed; no Azure jobs were submitted. "
+                f"{detail}"
+            )
+
+
 def launch_azure(arguments, *, service: AzureService | None = None) -> None:
     for option in ("azure_device", "instance_type", "subscription", "resource_group", "workspace"):
         if not getattr(arguments, option):
@@ -140,11 +156,18 @@ def launch_azure(arguments, *, service: AzureService | None = None) -> None:
 def _submit_captured_launch(arguments, service, output: Path, manifest: dict) -> None:
     manifest.update(
         target="azure", device=torch_device(arguments.azure_device),
-        status="submitting", results=[None] * len(manifest["configurations"]), jobs=[],
+        results=[None] * len(manifest["configurations"]), jobs=[],
         azure={"subscription": arguments.subscription, "resource_group": arguments.resource_group,
                "workspace": arguments.workspace, "device": arguments.azure_device,
                "instance_type": arguments.instance_type, "tier": "Standard"},
     )
+    try:
+        _validate_captured_code(output / "source")
+    except ValueError as error:
+        manifest.update(status="setup_failed", error=str(error))
+        write_json(output / "launch.json", manifest)
+        raise
+    manifest.update(status="submitting")
     requirements = output / "source" / "requirements.txt"
     if requirements.is_file():
         pinned_torch = re.search(

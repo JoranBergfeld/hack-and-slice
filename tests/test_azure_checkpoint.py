@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -105,6 +106,25 @@ class AzureCheckpointTests(unittest.TestCase):
         self.assertEqual(len(manifest["configurations"]), 2)
         self.assertEqual(manifest["configurations"][0]["learning_rate"], 0.002)
         self.assertEqual(manifest["configurations"][1]["hidden_size"], 32)
+
+    def test_incomplete_captured_training_is_rejected_before_azure_submission(self):
+        self.setup_launch()
+        training = self.workspace / "banking77/training.py"
+        training.write_text(training.read_text() + (
+            "\ndef build_loader(*args, **kwargs):\n"
+            "    raise NotImplementedError('preflight regression')\n"
+        ))
+
+        rejected = self.launch("--azure-device", "cpu",
+                               "--instance-type", "Standard_D2s_v3")
+        self.assertEqual(rejected.returncode, 1, rejected.stdout)
+        self.assertIn("Azure launch preflight check_training failed", rejected.stderr)
+        self.assertIn("no Azure jobs were submitted", rejected.stderr)
+        self.assertFalse((self.workspace / "comparison/submission").exists())
+        self.assertEqual(list((self.workspace / "service").iterdir()), [])
+        manifest = json.loads((self.workspace / "comparison/launch.json").read_text())
+        self.assertEqual(manifest["target"], "azure")
+        self.assertEqual(manifest["status"], "setup_failed")
 
     def test_explicit_cpu_submits_independent_jobs_without_training_and_captures_edits(self):
         self.setup_launch()
@@ -311,6 +331,7 @@ class AzureCheckpointTests(unittest.TestCase):
              "--output", str(self.workspace / "gpu-output")],
             cwd=self.workspace / "service" / name / "code",
             capture_output=True, text=True,
+            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
         )
         self.assertEqual(failed.returncode, 1, failed.stdout)
         self.assertIn("CUDA is unavailable; no CPU fallback", failed.stderr)
