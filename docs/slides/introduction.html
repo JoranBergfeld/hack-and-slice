@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Banking77: from pixels to message intents</title>
+  <style>
+    * { box-sizing: border-box; }
+    html { scroll-snap-type: y proximity; }
+    body { margin: 0; background: #101827; color: #f0f4fa; font-family: system-ui, sans-serif; }
+    section { min-height: 100vh; padding: 5vh 7vw; scroll-snap-align: start; border-bottom: 2px solid #51657b; }
+    h1 { font-size: clamp(2rem, 4vw, 3.8rem); line-height: 1.15; }
+    h2 { font-size: clamp(1.8rem, 3vw, 3rem); }
+    p, li, td, th { font-size: clamp(1.1rem, 2vw, 1.8rem); line-height: 1.5; }
+    li { margin: 0.5em 0; }
+    a { color: #9edcff; }
+    code { color: #ffd48a; overflow-wrap: anywhere; }
+    .flow { padding: 1em; border-left: 5px solid #9edcff; background: #1e3047; }
+    .meta, summary, details p { font-size: 1rem; }
+    .meta { color: #bdcbdc; }
+    details { margin-top: 1.5em; padding: 0.8em; border: 1px solid #51657b; }
+    summary { cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { padding: 0.3em 0.6em; text-align: left; border-bottom: 1px solid #51657b; }
+    @media print {
+      @page { size: landscape; margin: 12mm; }
+      html { scroll-snap-type: none; }
+      body { background: white; color: black; }
+      section { min-height: auto; padding: 0; border: 0; break-after: page; }
+      section:last-child { break-after: auto; }
+      h1 { font-size: 30pt; } h2 { font-size: 26pt; }
+      p, li, td, th { font-size: 16pt; }
+      details { display: none; }
+      .meta, a, code { color: #253449; }
+      .flow { background: none; border-color: #253449; }
+    }
+  </style>
+</head>
+<body>
+  <section id="welcome" aria-labelledby="title-1">
+    <p class="meta">1 / 16 · 1 minute</p>
+    <h1 id="title-1">From pixels to message intents</h1>
+    <p>Build a from-scratch classifier for Banking77.</p>
+    <ul>
+      <li>You bring Python, Git and command-line familiarity. No ML background needed.</li>
+      <li>We will understand one architecture, not how all AI works.</li>
+      <li>Finish line: your trained classifier labels a separate demonstration message.</li>
+    </ul>
+    <p class="meta">Scroll or use Page Down. Notes are expandable. All example outputs are illustrative, not measured results.</p>
+    <details><summary>Facilitator notes</summary><p>Suggested total: 25 minutes, including prompts. Enter browser full screen and leave notes collapsed on the projected display. Starting today is enough; participants may finish at home. There is no required accuracy threshold. The written challenges will explain each step without requiring these slides.</p></details>
+  </section>
+
+  <section id="pixels" aria-labelledby="title-2">
+    <p class="meta">2 / 16 · 1 minute</p>
+    <h2 id="title-2">Start with a digit</h2>
+    <p>An image is a grid of numbers: dark and light pixels.</p>
+    <p class="flow">Pixel values → hidden layer → ReLU → dropout → output layer → 10 logits</p>
+    <p>One output score per digit, 0 through 9. The largest score wins.</p>
+    <details><summary>Facilitator notes</summary><p>Imagine a handwritten 7. The input is numerical pixel values, not the word "seven". Flatten the grid into a list for this simple architecture. We are not training a digit model in the guided exercise; it is a familiar mental model before text.</p></details>
+  </section>
+
+  <section id="layers" aria-labelledby="title-3">
+    <p class="meta">3 / 16 · 2 minutes</p>
+    <h2 id="title-3">A layer combines evidence</h2>
+    <p>A linear layer has learned weights and biases.</p>
+    <p class="flow"><code>2 × 0.5 + (-1) × 1 + 0.25 = 0.25</code></p>
+    <ul>
+      <li>ReLU: <code>[-2, 0.25, 3] → [0, 0.25, 3]</code>.</li>
+      <li>Without a nonlinearity, stacked linear layers remain one linear transformation.</li>
+      <li>Dropout randomly omits activations during training; it is off for evaluation and prediction.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>Ask participants to check the weighted sum. The two-input example is only one unit, not a full image calculation. Weights and biases start as initialized numbers and are learned. ReLU lets the model represent more than a linear transformation. Dropout reduces reliance on particular activations; it does not permanently delete units. We omit dropout's training-time rescaling from this small explanation.</p></details>
+  </section>
+
+  <section id="logits" aria-labelledby="title-4">
+    <p class="meta">4 / 16 · 1.5 minutes</p>
+    <h2 id="title-4">Scores are not probabilities</h2>
+    <p>For a toy two-class problem:</p>
+    <table><thead><tr><th>Class</th><th>Logit</th><th>Softmax probability</th></tr></thead><tbody>
+      <tr><td>A</td><td>0</td><td>about 0.27</td></tr>
+      <tr><td>B</td><td>1</td><td>about 0.73</td></tr>
+    </tbody></table>
+    <p>Softmax turns scores into probabilities that sum to 1. Prediction chooses B either way.</p>
+    <p>Digits have 10 scores; our banking classifier will have 77.</p>
+    <details><summary>Facilitator notes</summary><p>These are invented logits to illustrate the distinction. Probabilities are not a guarantee of correctness. Softmax preserves the winning class, so we do not need it just to choose a label. Negative logits are also valid scores.</p></details>
+  </section>
+
+  <section id="loss" aria-labelledby="title-5">
+    <p class="meta">5 / 16 · 2 minutes</p>
+    <h2 id="title-5">Training needs a correct label</h2>
+    <p>Cross-entropy penalizes low probability for the correct class.</p>
+    <table><thead><tr><th>Probability of correct label</th><th>Loss: minus natural log</th></tr></thead><tbody>
+      <tr><td>0.50</td><td>about 0.69</td></tr>
+      <tr><td>0.90</td><td>about 0.11</td></tr>
+      <tr><td>0.10</td><td>about 2.30</td></tr>
+    </tbody></table>
+    <p>Smaller loss is better. A confident wrong prediction is expensive.</p>
+    <p>PyTorch cross-entropy takes logits directly; do not apply softmax first.</p>
+    <details><summary>Facilitator notes</summary><p>Ask which row describes a better prediction for the known label. No calculus or log derivation needed: use the table as an intuition for the penalty. The two-class example becomes the same operation over ten digits or 77 intents. PyTorch handles log-softmax internally.</p></details>
+  </section>
+
+  <section id="gradients" aria-labelledby="title-6">
+    <p class="meta">6 / 16 · 2 minutes</p>
+    <h2 id="title-6">How do the numbers improve?</h2>
+    <p class="flow">Labeled batch → logits → loss → gradients → optimizer update → repeat</p>
+    <ul>
+      <li>A gradient tells how a parameter change affects loss locally.</li>
+      <li>Toy plain gradient step: weight <code>0.50</code>, gradient <code>+2</code>, learning rate <code>0.01</code> → weight <code>0.48</code>.</li>
+      <li>Automatic differentiation computes gradients. You do not implement backpropagation.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>The toy arithmetic is 0.50 minus 0.01 times 2, a plain gradient-descent step, not an Adam calculation. A positive gradient suggests decreasing this weight; a negative gradient suggests increasing it. Local direction is not a promise that every batch or validation score improves. Training uses many parameters at once.</p></details>
+  </section>
+
+  <section id="adam" aria-labelledby="title-7">
+    <p class="meta">7 / 16 · 1.5 minutes</p>
+    <h2 id="title-7">Adam takes the steps</h2>
+    <ul>
+      <li>Adam uses recent gradient direction and size to adapt parameter updates.</li>
+      <li>The learning rate controls the update scale; it is not the exact step of every weight.</li>
+      <li>Too large can destabilize learning. Too small can make progress slow.</li>
+      <li>Use PyTorch Adam with default optimizer parameters and no weight decay.</li>
+    </ul>
+    <p><code>0.001</code> is a starting learning rate, not a proven best value.</p>
+    <details><summary>Facilitator notes</summary><p>Adam is provided, not a participant implementation exercise. Do not derive its formula. Compare the direction and scale intuition with the previous toy step, while explicitly distinguishing Adam's adapted updates from that plain step. We will compare chosen configurations rather than assume a universal best learning rate.</p></details>
+  </section>
+
+  <section id="splits" aria-labelledby="title-8">
+    <p class="meta">8 / 16 · 2 minutes</p>
+    <h2 id="title-8">Learning is not the same as checking</h2>
+    <table><thead><tr><th>Split</th><th>Purpose</th></tr></thead><tbody>
+      <tr><td>Training</td><td>Update parameters using labeled batches.</td></tr>
+      <tr><td>Validation</td><td>Compare configurations and choose when to stop.</td></tr>
+      <tr><td>Held-out test</td><td>One final evaluation after selection, not tuning.</td></tr>
+    </tbody></table>
+    <p>A batch groups examples for one update. An epoch is one pass through training examples.</p>
+    <p>Shuffle training data each epoch. Validation runs without updates or dropout.</p>
+    <details><summary>Facilitator notes</summary><p>Keep the digit example in mind: repeatedly practicing the same images is not an independent exam. Ask why selecting a learning rate using the test score would spoil that exam. The test set is public, but keeping it out of development is a participant agreement, not special enforcement machinery.</p></details>
+  </section>
+
+  <section id="early-stopping" aria-labelledby="title-9">
+    <p class="meta">9 / 16 · 2 minutes</p>
+    <h2 id="title-9">Keep the best validation checkpoint</h2>
+    <p>Invented validation accuracies, with patience 3:</p>
+    <p class="flow">Epoch: <code>1, 2, 3, 4, 5</code><br>Accuracy: <code>50%, 60%, 60%, 59%, 58%</code></p>
+    <ul>
+      <li>No improvement for three epochs: stop after epoch 5.</li>
+      <li>Use epoch 2, not the last weights. Equal accuracy keeps the earliest epoch.</li>
+      <li>Training loss may keep falling while validation stalls: memorizing is not generalizing.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>Ask which checkpoint to keep. This example uses strict improvement in validation accuracy: epochs 3, 4 and 5 count toward patience. The epoch limit is a separate cap. These are invented values, not a Banking77 training result. A latest resumable snapshot serves recovery; it is separate from the best-validation model used for selection.</p></details>
+  </section>
+
+  <section id="text" aria-labelledby="title-10">
+    <p class="meta">10 / 16 · 1 minute</p>
+    <h2 id="title-10">Now replace pixels with text</h2>
+    <p>Banking77: customer messages labeled with 77 banking intents.</p>
+    <p class="flow">"My card hasn't arrived." → tokens → IDs → learned vectors → mean → classifier → 77 logits</p>
+    <p>The loss, gradients, Adam and split roles stay the same. The input representation changes.</p>
+    <details><summary>Facilitator notes</summary><p>This is the architecture participants actually build. An intent is the message's category, not a generated answer. We learn from scratch, including the word vectors; no pretrained encoder is part of the guided exercise.</p></details>
+  </section>
+
+  <section id="vocabulary" aria-labelledby="title-11">
+    <p class="meta">11 / 16 · 2 minutes</p>
+    <h2 id="title-11">Token IDs identify words, not meanings</h2>
+    <p>Lowercase, then tokenize with <code>[a-z0-9']+</code>:</p>
+    <p class="flow"><code>"My card hasn't arrived." → ["my", "card", "hasn't", "arrived"]</code></p>
+    <ul>
+      <li>Build the vocabulary only from training messages; keep tokens seen at least twice.</li>
+      <li>Reserve <code>0</code> for <code>&lt;unk&gt;</code>. Unseen tokens map there.</li>
+      <li><code>"???"</code> has no tokens: use one <code>&lt;unk&gt;</code> so averaging is defined.</li>
+      <li>A larger ID does not mean a more important or more similar word.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>Validation and test messages must not influence the vocabulary. Ask what happens to a brand-new word at prediction time. A toy vocabulary might map "card" to 1 and "arrived" to 2; actual IDs come from the saved training vocabulary, not this slide. The apostrophe in "hasn't" stays inside its token.</p></details>
+  </section>
+
+  <section id="embeddings" aria-labelledby="title-12">
+    <p class="meta">12 / 16 · 1.5 minutes</p>
+    <h2 id="title-12">Look up vectors, then average</h2>
+    <p>Illustrative two-dimensional embeddings:</p>
+    <p class="flow"><code>[1, 0]</code> and <code>[0, 2]</code> → mean <code>[0.5, 1]</code></p>
+    <ul>
+      <li>Embeddings are learned parameters, updated along with classifier weights.</li>
+      <li>Mean pooling makes one fixed-size vector from any number of tokens.</li>
+      <li>Reversing the tokens gives the same mean: word order is lost.</li>
+    </ul>
+    <p>PyTorch mean-mode <code>EmbeddingBag</code> combines lookup and pooling.</p>
+    <details><summary>Facilitator notes</summary><p>Ask the audience to average each coordinate. These numbers are illustrative, not actual learned word vectors. The vector's coordinates are not hand-assigned language features. Repetition can change the mean, but reordering cannot. Pretrained embeddings are an optional next step after this from-scratch exercise.</p></details>
+  </section>
+
+  <section id="classifier" aria-labelledby="title-13">
+    <p class="meta">13 / 16 · 1 minute</p>
+    <h2 id="title-13">The text-classifier equivalent</h2>
+    <p class="flow">Mean embedding → linear hidden layer → ReLU → dropout → linear output → 77 intent logits</p>
+    <ul>
+      <li>Start with embedding size <code>64</code>, hidden size <code>128</code>, dropout <code>0.3</code>.</li>
+      <li>Sizes and dropout are configurable starting values, not fixed rules.</li>
+      <li>Predict the highest-scoring official intent label.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>Connect the layers to the digit architecture. The number of outputs is tied to Banking77's 77 labels; embedding and hidden widths are choices. Cross-entropy still receives logits. Save the vocabulary and official-label-to-index mapping with the weights, not just the weights alone.</p></details>
+  </section>
+
+  <section id="comparisons" aria-labelledby="title-14">
+    <p class="meta">14 / 16 · 2 minutes</p>
+    <h2 id="title-14">Compare your chosen configurations</h2>
+    <ul>
+      <li>Choose at least two; vary learning rate, batch size, epoch limit, early-stopping settings, embedding size, hidden size or dropout.</li>
+      <li>Keep the architecture sequence, Adam, seed 42, split and preprocessing shared.</li>
+      <li>Inspect training loss, validation accuracy, comparison charts and validation predictions.</li>
+      <li>Choose highest validation accuracy; tied runs use configuration-list order.</li>
+    </ul>
+    <p class="meta">Suggestions: learning rates 0.0003 / 0.001 / 0.003; batch size 64; epoch limit 30; patience 3. Not a mandatory three-rate sweep.</p>
+    <details><summary>Facilitator notes</summary><p>For example, keep everything fixed except learning rate in two configurations, or instead compare two hidden sizes. No fixed maximum, but more runs take time and may incur Azure charges. Select only when every chosen configuration has valid matching results; do not silently choose from a partial comparison. The configuration chart is not limited to learning rates.</p></details>
+  </section>
+
+  <section id="evaluation" aria-labelledby="title-15">
+    <p class="meta">15 / 16 · 1.5 minutes</p>
+    <h2 id="title-15">Then evaluate once and predict locally</h2>
+    <ul>
+      <li>Official training data: <code>10,003 → 9,002 training + 1,001 validation</code>, intent-stratified with seed 42.</li>
+      <li>Official held-out test: <code>3,080</code> messages, for one final evaluation after selection.</li>
+      <li>Accuracy is the fraction correct; macro-F1 averages per-intent F1, giving each intent equal weight.</li>
+      <li>Label a separate demonstration message using the saved model, vocabulary, label mapping and same preprocessing.</li>
+    </ul>
+    <details><summary>Facilitator notes</summary><p>F1 balances precision (how often predictions of an intent are right) and recall (how many examples of that intent are found). Participants implement accuracy and macro-F1 in the written challenges. Evaluation and demonstration-message prediction run locally on CPU, whether training ran locally or on Azure. A demonstration is not a benchmark or evidence of general accuracy.</p></details>
+  </section>
+
+  <section id="next" aria-labelledby="title-16">
+    <p class="meta">16 / 16 · 1 minute</p>
+    <h2 id="title-16">Your five checkpoints</h2>
+    <p class="flow">Prepare data and vocabulary → build classifier → train, compare and select → evaluate → label a demonstration message</p>
+    <p>Train on local CPU, or explicitly choose Azure ML CPU/GPU in your existing workspace. Azure compute can incur charges.</p>
+    <p>Start today; optionally finish at home. No required accuracy threshold or cost-scoring rule.</p>
+    <p class="meta">Optional afterward: LLM comparison, inference-cost investigation, endpoint deployment and registration, pretrained embeddings, or Foundry compatibility investigation. No drop-in Foundry import is promised.</p>
+    <p class="meta"><a href="README.md">Shared concepts and presentation guidance</a> · <a href="https://github.com/JoranBergfeld/hack-and-slice/issues/13">Current specification</a></p>
+    <details><summary>Facilitator notes</summary><p>Hand over to the independently understandable written challenges. Optional next steps are not extra requirements. You do not need Azure access to review these slides or to use the local CPU path. The deck has shown conceptual arithmetic only, with no trained model or benchmark claims.</p></details>
+  </section>
+</body>
+</html>
