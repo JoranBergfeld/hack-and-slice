@@ -1,51 +1,76 @@
 # Banking77 guided exercise
 
-Start with [Checkpoint 1: Prepare data](docs/challenges/01-prepare-data.md).
-It includes local Python setup, starter-function contracts, offline quick
-checks, and a collapsed solution. Starter learning functions are intentionally
-incomplete.
+Work through the five checkpoints to build, train, evaluate, and use a
+classifier for the Banking77 dataset. Starter learning functions are
+intentionally incomplete.
 
-Continue with [Checkpoint 2: Build the classifier](docs/challenges/02-build-classifier.md).
-It introduces learned mean embeddings, configurable model dimensions, batching,
-and `python -m banking77.check_model` without a training run.
+## Checkpoints
 
-Continue with [Checkpoint 3: Train locally or on Azure ML](docs/challenges/03-train-locally.md).
-It covers cross-entropy, Adam, per-epoch validation and early stopping, checked
-offline with `python -m banking77.check_training`, then trains one configuration
-on CPU with `python -m banking77.train` and saves its best-validation classifier.
-The same checkpoint now includes participant-written selection and
-`python -m banking77.compare launch` / `select`: edit the provided
-[`configurations.json`](configurations.json) starting list and explicitly choose
-`--target local-cpu` to run sequentially on CPU with captured code and data, inspect the SVG
-comparison chart, then select only from a complete, matching launch.
-Alternatively choose `--target azure` and Azure ML CPU or GPU explicitly: submit independent
-Standard-tier serverless jobs with the same captured participant code, inspect
-status/log links, collect completed outputs while other jobs are pending or
-failed, then use the same local selection/evaluation/prediction workflow.
-Training saves a latest resumable snapshot after every epoch, separate from the
-best-validation classifier, so an interrupted Azure configuration can be
-explicitly resumed (or restarted) with `python -m banking77.compare recover`,
+### 1. Prepare data
+
+[Open Checkpoint 1: Prepare data](docs/challenges/01-prepare-data.md) for local
+Python setup, starter-function contracts, offline quick checks, and a collapsed
+solution.
+
+### 2. Build the classifier
+
+[Open Checkpoint 2: Build the classifier](docs/challenges/02-build-classifier.md)
+to implement learned mean embeddings, configurable model dimensions, and
+batching. Check the model without a training run using
+`python -m banking77.check_model`.
+
+### 3. Train locally or on Azure ML
+
+[Open Checkpoint 3: Train locally or on Azure ML](docs/challenges/03-train-locally.md)
+to implement cross-entropy, Adam, per-epoch validation, and early stopping.
+Check the training logic offline with `python -m banking77.check_training`,
+then train one configuration on CPU with `python -m banking77.train`. This
+saves the classifier with the best validation performance.
+
+The checkpoint also covers participant-written model selection with
+`python -m banking77.compare launch` and `select`:
+
+- Edit the provided [`configurations.json`](configurations.json) starting list.
+- For local runs, choose `--target local-cpu` to run configurations sequentially
+  on CPU with captured code and data. Inspect the SVG comparison chart, then
+  select only from a complete, matching launch.
+- Alternatively, choose `--target azure` and explicitly select Azure ML CPU or
+  GPU. Submit independent Standard-tier serverless jobs with the same captured
+  participant code, inspect status and log links, and collect completed outputs
+  while other jobs are pending or failed. Then use the same local
+  selection/evaluation/prediction workflow.
+
+After every epoch, training saves a latest resumable snapshot, separate from
+the best-validation classifier. If an Azure configuration is interrupted, use
+`python -m banking77.compare recover` to explicitly resume or restart it,
 optionally continuing a GPU configuration on CPU, without touching completed
-results. Completed jobs whose outputs are rejected by collection can also be
+results. Jobs whose outputs are rejected during collection can also be
 explicitly restarted or resumed from a valid snapshot.
-The guide covers existing workspace access, authentication, quota, charges and
-cleanup; the helper does not provision or delete shared Azure resources.
 
-Continue with [Checkpoint 4: Evaluate the selected classifier](docs/challenges/04-evaluate-classifier.md).
-Implement accuracy and macro-F1 by hand, check them with synthetic IDs, then
-use `python -m banking77.evaluate` to evaluate only the selected winner on
-the official held-out test set on CPU. Follow the explained one-final-evaluation
-rule; there is no enforced one-use lock.
+The guide covers existing workspace access, authentication, quota, charges,
+and cleanup. The helper does not provision or delete shared Azure resources.
 
-Finish with [Checkpoint 5: Use the classifier](docs/challenges/05-use-classifier.md).
-Implement saved-model prediction, run `python -m banking77.check_prediction`,
-then use `python -m banking77.predict` on a separate demonstration message.
-The checkpoint also suggests optional LLM comparison, inference-cost,
-deployment/registration, Foundry compatibility and pretrained-embedding
-investigations with documentation links and no provided solutions.
+### 4. Evaluate the selected classifier
 
-Run the repository's automated behavior tests after installing
-`requirements.txt`:
+[Open Checkpoint 4: Evaluate the selected classifier](docs/challenges/04-evaluate-classifier.md)
+to implement accuracy and macro-F1 by hand and check them with synthetic IDs.
+Then use `python -m banking77.evaluate` to evaluate only the selected winner on
+the official held-out test set, on CPU. Follow the explained one-final-
+evaluation rule; there is no enforced one-use lock.
+
+### 5. Use the classifier
+
+[Open Checkpoint 5: Use the classifier](docs/challenges/05-use-classifier.md)
+to implement saved-model prediction, run
+`python -m banking77.check_prediction`, and use `python -m banking77.predict`
+on a separate demonstration message. Optional investigations include LLM
+comparison, inference cost, deployment/registration, Foundry compatibility,
+and pretrained embeddings. Documentation links are provided, but no solutions
+are included for these investigations.
+
+## Run the tests
+
+Install `requirements.txt`, then run the repository's automated behavior tests:
 
 ```powershell
 python -m unittest discover -s tests -v
